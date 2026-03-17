@@ -179,8 +179,17 @@ class OpsGraphAppService:
             command = ReplayRunCommand.model_validate(command)
         return self.repository.start_replay_run(command)
 
-    def list_replays(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayRunSummary]:
-        return self.repository.list_replays(workspace_id, incident_id)
+    def list_replays(
+        self,
+        workspace_id: str,
+        incident_id: str | None = None,
+        replay_case_id: str | None = None,
+    ) -> list[ReplayRunSummary]:
+        return self.repository.list_replays(
+            workspace_id,
+            incident_id,
+            replay_case_id,
+        )
 
     def list_replay_cases(
         self,

@@ -37,7 +37,7 @@ Product-specific thin adapters now live under `src/opsgraph_app/`.
 - Build a domain-facing application service from `opsgraph_app.bootstrap.build_app_service`
 - Use `opsgraph_app.app:create_app` as a FastAPI factory when `fastapi` is installed
 - Default product repository is now SQLAlchemy-backed and shares the same runtime engine/session as the workflow layer
-- Current product API covers alert intake, incident list/workspace queries, fact mutation, recommendation/comms decisions, resolve/close, replay for incidents and replay cases, replay-case read/list APIs, richer replay evaluation metrics, and workflow-backed incident response plus retrospective flows with persisted replay-case snapshots
+- Current product API covers alert intake, incident list/workspace queries, fact mutation, recommendation/comms decisions, resolve/close, replay for incidents and replay cases, replay-case read/list APIs, replay-run filtering by replay case, richer replay evaluation metrics, and workflow-backed incident response plus retrospective flows with persisted replay-case snapshots
 - Run the local workflow smoke script:
 
 ```powershell

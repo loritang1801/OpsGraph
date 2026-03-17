@@ -205,8 +205,12 @@ def create_fastapi_app(service: OpsGraphAppService):
         return service.start_replay_run(command)
 
     @app.get("/api/v1/opsgraph/replays")
-    def list_replays(workspace_id: str, incident_id: str | None = None) -> list[ReplayRunSummary]:
-        return service.list_replays(workspace_id, incident_id)
+    def list_replays(
+        workspace_id: str,
+        incident_id: str | None = None,
+        replay_case_id: str | None = None,
+    ) -> list[ReplayRunSummary]:
+        return service.list_replays(workspace_id, incident_id, replay_case_id)
 
     @app.get("/api/v1/opsgraph/replays/baselines")
     def list_replay_baselines(

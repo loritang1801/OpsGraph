@@ -99,7 +99,12 @@ class OpsGraphRepository(Protocol):
 
     def start_replay_run(self, command: ReplayRunCommand) -> ReplayRunSummary: ...
 
-    def list_replays(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayRunSummary]: ...
+    def list_replays(
+        self,
+        workspace_id: str,
+        incident_id: str | None = None,
+        replay_case_id: str | None = None,
+    ) -> list[ReplayRunSummary]: ...
 
     def list_replay_cases(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayCaseSummary]: ...
 
@@ -1141,11 +1146,18 @@ class SqlAlchemyOpsGraphRepository:
             created_at=created_at,
         )
 
-    def list_replays(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayRunSummary]:
+    def list_replays(
+        self,
+        workspace_id: str,
+        incident_id: str | None = None,
+        replay_case_id: str | None = None,
+    ) -> list[ReplayRunSummary]:
         with self.session_factory() as session:
             stmt = select(ReplayRunRow).where(ReplayRunRow.ops_workspace_id == workspace_id)
             if incident_id is not None:
                 stmt = stmt.where(ReplayRunRow.incident_id == incident_id)
+            if replay_case_id is not None:
+                stmt = stmt.where(ReplayRunRow.replay_case_id == replay_case_id)
             rows = session.scalars(stmt.order_by(ReplayRunRow.created_at.desc())).all()
             return [self._to_replay(row) for row in rows]
 

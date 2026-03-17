@@ -616,6 +616,7 @@ Query params:
 
 - `workspace_id`
 - `incident_id`
+- `replay_case_id`
 - `status`
 - `cursor`
 - `limit`
