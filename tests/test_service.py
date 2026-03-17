@@ -322,6 +322,29 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(filtered[0].replay_case_id, postmortem.replay_case_id)
         self.assertEqual(unrelated, [])
 
+    def test_list_replay_reports_can_filter_by_replay_case_id(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.resolve_incident("incident-1", resolve_incident_command())
+        service.build_retrospective(retrospective_command(workflow_run_id="opsgraph-retro-report-filter"))
+        postmortem = service.get_postmortem("incident-1")
+
+        baseline = service.capture_replay_baseline(replay_baseline_capture_command())
+        replay = service.start_replay_run(replay_case_run_command(replay_case_id=postmortem.replay_case_id))
+        service.execute_replay_run(replay.replay_run_id)
+        report = service.evaluate_replay_run(
+            replay.replay_run_id,
+            replay_evaluation_command(baseline_id=baseline.baseline_id),
+        )
+
+        filtered = service.list_replay_evaluations("ops-ws-1", replay_case_id=postmortem.replay_case_id)
+        unrelated = service.list_replay_evaluations("ops-ws-1", replay_case_id="replay-case-missing")
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0].report_id, report.report_id)
+        self.assertEqual(unrelated, [])
+
     def test_resolve_requires_confirmed_root_cause_fact(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)

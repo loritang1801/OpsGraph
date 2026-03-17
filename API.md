@@ -625,6 +625,23 @@ Response:
 
 - `200 OK`
 
+### 5.16 `GET /api/v1/opsgraph/replays/reports`
+
+Purpose: list replay evaluation reports for one workspace with optional incident, replay run, or replay case filters.
+
+Auth: `viewer`
+
+Query params:
+
+- `workspace_id`
+- `incident_id`
+- `replay_run_id`
+- `replay_case_id`
+
+Response:
+
+- `200 OK`
+
 ## 6. SSE Contract
 
 ### 6.1 Topics

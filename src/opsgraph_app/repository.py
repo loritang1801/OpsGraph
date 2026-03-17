@@ -166,6 +166,7 @@ class OpsGraphRepository(Protocol):
         workspace_id: str,
         incident_id: str | None = None,
         replay_run_id: str | None = None,
+        replay_case_id: str | None = None,
     ) -> list[ReplayEvaluationSummary]: ...
 
     def attach_replay_evaluation_artifact(
@@ -1324,6 +1325,7 @@ class SqlAlchemyOpsGraphRepository:
         workspace_id: str,
         incident_id: str | None = None,
         replay_run_id: str | None = None,
+        replay_case_id: str | None = None,
     ) -> list[ReplayEvaluationSummary]:
         with self.session_factory() as session:
             stmt = select(ReplayEvaluationRow).where(ReplayEvaluationRow.ops_workspace_id == workspace_id)
@@ -1331,6 +1333,13 @@ class SqlAlchemyOpsGraphRepository:
                 stmt = stmt.where(ReplayEvaluationRow.incident_id == incident_id)
             if replay_run_id is not None:
                 stmt = stmt.where(ReplayEvaluationRow.replay_run_id == replay_run_id)
+            if replay_case_id is not None:
+                matching_run_ids = session.scalars(
+                    select(ReplayRunRow.replay_run_id).where(ReplayRunRow.replay_case_id == replay_case_id)
+                ).all()
+                if not matching_run_ids:
+                    return []
+                stmt = stmt.where(ReplayEvaluationRow.replay_run_id.in_(matching_run_ids))
             rows = session.scalars(stmt.order_by(ReplayEvaluationRow.created_at.desc())).all()
             return [self._to_replay_evaluation(row) for row in rows]
 

@@ -243,7 +243,8 @@ def create_fastapi_app(service: OpsGraphAppService):
         workspace_id: str,
         incident_id: str | None = None,
         replay_run_id: str | None = None,
+        replay_case_id: str | None = None,
     ) -> list[ReplayEvaluationSummary]:
-        return service.list_replay_evaluations(workspace_id, incident_id, replay_run_id)
+        return service.list_replay_evaluations(workspace_id, incident_id, replay_run_id, replay_case_id)
 
     return app

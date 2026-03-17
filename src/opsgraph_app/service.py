@@ -213,8 +213,14 @@ class OpsGraphAppService:
         workspace_id: str,
         incident_id: str | None = None,
         replay_run_id: str | None = None,
+        replay_case_id: str | None = None,
     ) -> list[ReplayEvaluationSummary]:
-        return self.repository.list_replay_evaluations(workspace_id, incident_id, replay_run_id)
+        return self.repository.list_replay_evaluations(
+            workspace_id,
+            incident_id,
+            replay_run_id,
+            replay_case_id,
+        )
 
     def update_replay_status(
         self,
