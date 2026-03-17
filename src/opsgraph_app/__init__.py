@@ -35,6 +35,7 @@ from .api_models import (
     ResolveIncidentCommand,
     RetrospectiveCommand,
     SeverityOverrideCommand,
+    SignalSummary,
     TimelineEventSummary,
 )
 from .bootstrap import (
@@ -111,6 +112,7 @@ __all__ = [
     "ResolveIncidentCommand",
     "RetrospectiveCommand",
     "SeverityOverrideCommand",
+    "SignalSummary",
     "SqlAlchemyOpsGraphRepository",
     "TimelineEventSummary",
     "build_api_service",

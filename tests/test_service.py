@@ -43,11 +43,16 @@ class OpsGraphServiceTests(unittest.TestCase):
         incidents = service.list_incidents("ops-ws-1")
         workspace = service.get_incident_workspace("incident-1")
         ingest = service.ingest_alert(alert_ingest_command())
+        workspace_after = service.get_incident_workspace("incident-1")
 
         self.assertEqual(len(incidents), 1)
         self.assertEqual(workspace.incident.incident_key, "INC-2026-0001")
+        self.assertEqual(len(workspace.signals), 1)
+        self.assertEqual(workspace.signals[0].signal_id, "signal-1")
         self.assertEqual(ingest.incident_id, "incident-1")
         self.assertFalse(ingest.incident_created)
+        self.assertEqual(len(workspace_after.signals), 2)
+        self.assertTrue(any(item.signal_id == ingest.signal_id for item in workspace_after.signals))
 
     def test_list_incidents_supports_status_severity_and_service_filters(self) -> None:
         service = build_app_service()
@@ -117,10 +122,24 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(replay.status, "queued")
         self.assertEqual(replay_updated.status, "completed")
         self.assertGreaterEqual(len(replays), 1)
+        self.assertGreaterEqual(len(workspace.signals), 1)
         self.assertEqual(len(workspace.hypotheses), 1)
         self.assertEqual(len(workspace.approval_tasks), 1)
         self.assertEqual(workspace.approval_tasks[0].approval_task_id, "approval-task-1")
         self.assertEqual(workspace.recommendations[0].approval_task_id, "approval-task-1")
+
+    def test_incident_execution_seed_uses_persisted_signals(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        ingest = service.ingest_alert(alert_ingest_command(source="grafana"))
+        seed = service.repository.get_incident_execution_seed("incident-1")
+
+        self.assertIn("signal-1", seed["signal_ids"])
+        self.assertIn(ingest.signal_id, seed["signal_ids"])
+        self.assertTrue(
+            any(item["correlation_key"] == "checkout-api:high-error-rate" for item in seed["signal_summaries"])
+        )
 
     def test_get_approval_task_returns_linked_task(self) -> None:
         service = build_app_service()

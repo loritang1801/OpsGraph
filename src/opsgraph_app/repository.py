@@ -39,6 +39,7 @@ from .api_models import (
     ReplayRunSummary,
     ResolveIncidentCommand,
     CloseIncidentCommand,
+    SignalSummary,
     SeverityOverrideCommand,
     TimelineEventSummary,
 )
@@ -309,6 +310,18 @@ class SignalIndexRow(Base):
     incident_id: Mapped[str] = mapped_column(String(255), index=True)
 
 
+class SignalRow(Base):
+    __tablename__ = "opsgraph_signal"
+
+    signal_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    source: Mapped[str] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(50))
+    title: Mapped[str] = mapped_column(String(255))
+    dedupe_key: Mapped[str] = mapped_column(String(255), index=True)
+    fired_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
 class PostmortemRow(Base):
     __tablename__ = "opsgraph_postmortem"
 
@@ -492,6 +505,17 @@ class SqlAlchemyOpsGraphRepository:
                 )
             )
             session.add(
+                SignalRow(
+                    signal_id="signal-1",
+                    incident_id="incident-1",
+                    source="grafana",
+                    status="firing",
+                    title="HighErrorRate",
+                    dedupe_key="checkout-api:high-error-rate",
+                    fired_at=created_at,
+                )
+            )
+            session.add(
                 TimelineEventRow(
                     event_id="timeline-1",
                     incident_id="incident-1",
@@ -527,6 +551,17 @@ class SqlAlchemyOpsGraphRepository:
             fact_set_version=row.fact_set_version,
             source_refs=row.source_refs,
             created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_signal(row: SignalRow) -> SignalSummary:
+        return SignalSummary(
+            signal_id=row.signal_id,
+            source=row.source,
+            status=row.status,
+            title=row.title,
+            dedupe_key=row.dedupe_key,
+            fired_at=row.fired_at,
         )
 
     @staticmethod
@@ -715,6 +750,11 @@ class SqlAlchemyOpsGraphRepository:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
                 raise KeyError(incident_id)
+            signal_rows = session.scalars(
+                select(SignalRow)
+                .where(SignalRow.incident_id == incident_id)
+                .order_by(SignalRow.fired_at.desc())
+            ).all()
             fact_rows = session.scalars(
                 select(IncidentFactRow)
                 .where(IncidentFactRow.incident_id == incident_id)
@@ -748,6 +788,7 @@ class SqlAlchemyOpsGraphRepository:
             ).all()
             return IncidentWorkspaceResponse(
                 incident=self._to_incident(incident_row),
+                signals=[self._to_signal(row) for row in signal_rows],
                 confirmed_facts=[self._to_fact(row) for row in fact_rows],
                 hypotheses=[self._to_hypothesis(row) for row in hypothesis_rows],
                 recommendations=[self._to_recommendation(row) for row in recommendation_rows],
@@ -846,6 +887,17 @@ class SqlAlchemyOpsGraphRepository:
                 incident_row = session.get(IncidentRow, incident_id)
                 if incident_row is not None:
                     incident_row.updated_at = self._normalize_timestamp(observed_at)  # type: ignore[assignment]
+            session.add(
+                SignalRow(
+                    signal_id=signal_id,
+                    incident_id=incident_id,
+                    source=source,
+                    status="firing",
+                    title=summary,
+                    dedupe_key=correlation_key,
+                    fired_at=self._normalize_timestamp(observed_at) or self._utcnow_naive(),
+                )
+            )
             session.add(
                 TimelineEventRow(
                     event_id=f"timeline-{uuid4().hex[:8]}",
@@ -1696,6 +1748,11 @@ class SqlAlchemyOpsGraphRepository:
 
     @staticmethod
     def _build_incident_execution_seed(session: Session, incident_row: IncidentRow) -> dict[str, object]:
+        signal_rows = session.scalars(
+            select(SignalRow)
+            .where(SignalRow.incident_id == incident_row.incident_id)
+            .order_by(SignalRow.fired_at.asc())
+        ).all()
         fact_rows = session.scalars(
             select(IncidentFactRow)
             .where(IncidentFactRow.incident_id == incident_row.incident_id)
@@ -1716,8 +1773,17 @@ class SqlAlchemyOpsGraphRepository:
         return {
             "incident_id": incident_row.incident_id,
             "ops_workspace_id": incident_row.ops_workspace_id,
-            "signal_ids": [],
-            "signal_summaries": [],
+            "signal_ids": [row.signal_id for row in signal_rows],
+            "signal_summaries": [
+                {
+                    "signal_id": row.signal_id,
+                    "source": row.source,
+                    "correlation_key": row.dedupe_key,
+                    "summary": row.title,
+                    "observed_at": row.fired_at.replace(tzinfo=UTC).isoformat().replace("+00:00", "Z"),
+                }
+                for row in signal_rows
+            ],
             "current_incident_candidates": [],
             "context_bundle_id": "context-1",
             "current_fact_set_version": incident_row.current_fact_set_version,

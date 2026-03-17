@@ -191,8 +191,18 @@ class ReplayEvaluationSummary(OpsGraphModel):
     created_at: datetime
 
 
+class SignalSummary(OpsGraphModel):
+    signal_id: str
+    source: str
+    status: str
+    title: str
+    dedupe_key: str
+    fired_at: datetime
+
+
 class IncidentWorkspaceResponse(OpsGraphModel):
     incident: IncidentSummary
+    signals: list[SignalSummary] = Field(default_factory=list)
     confirmed_facts: list[FactSummary] = Field(default_factory=list)
     hypotheses: list[HypothesisSummary] = Field(default_factory=list)
     recommendations: list[RecommendationSummary] = Field(default_factory=list)
