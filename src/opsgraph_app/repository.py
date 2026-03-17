@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -320,6 +321,17 @@ class SignalRow(Base):
     title: Mapped[str] = mapped_column(String(255))
     dedupe_key: Mapped[str] = mapped_column(String(255), index=True)
     fired_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class ArtifactBlobRow(Base):
+    __tablename__ = "opsgraph_artifact_blob"
+
+    artifact_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    artifact_type: Mapped[str] = mapped_column(String(80))
+    content_text: Mapped[str] = mapped_column(Text)
+    metadata_payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
 
 
 class PostmortemRow(Base):
@@ -1690,25 +1702,36 @@ class SqlAlchemyOpsGraphRepository:
             ).first()
             if postmortem_row is None:
                 replay_case_id = f"replay-case-{uuid4().hex[:8]}"
-                session.add(
-                    PostmortemRow(
-                        postmortem_id=f"postmortem-{uuid4().hex[:8]}",
-                        incident_id=incident_id,
-                        status="draft",
-                        fact_set_version=incident_row.current_fact_set_version,
-                        artifact_id=None,
-                        replay_case_id=replay_case_id,
-                        updated_at=now,
-                    )
+                postmortem_row = PostmortemRow(
+                    postmortem_id=f"postmortem-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    status="draft",
+                    fact_set_version=incident_row.current_fact_set_version,
+                    artifact_id=f"artifact-postmortem-{incident_id}",
+                    replay_case_id=replay_case_id,
+                    updated_at=now,
                 )
+                session.add(postmortem_row)
             else:
                 replay_case_id = postmortem_row.replay_case_id or f"replay-case-{uuid4().hex[:8]}"
                 postmortem_row.status = "draft"
                 postmortem_row.fact_set_version = incident_row.current_fact_set_version
+                postmortem_row.artifact_id = postmortem_row.artifact_id or f"artifact-postmortem-{incident_id}"
                 postmortem_row.replay_case_id = replay_case_id
                 postmortem_row.updated_at = now
             replay_case_row = session.get(ReplayCaseRow, replay_case_id)
             input_snapshot = self._build_incident_execution_seed(session, incident_row)
+            fact_rows = session.scalars(
+                select(IncidentFactRow)
+                .where(IncidentFactRow.incident_id == incident_id)
+                .where(IncidentFactRow.status == "confirmed")
+                .order_by(IncidentFactRow.created_at.asc())
+            ).all()
+            timeline_rows = session.scalars(
+                select(TimelineEventRow)
+                .where(TimelineEventRow.incident_id == incident_id)
+                .order_by(TimelineEventRow.created_at.asc())
+            ).all()
             if replay_case_row is None:
                 session.add(
                     ReplayCaseRow(
@@ -1731,6 +1754,47 @@ class SqlAlchemyOpsGraphRepository:
                 replay_case_row.case_name = f"{incident_row.incident_key} retrospective replay"
                 replay_case_row.source_workflow_run_id = workflow_run_id
                 replay_case_row.updated_at = now
+            session.merge(
+                ArtifactBlobRow(
+                    artifact_id=postmortem_row.artifact_id,
+                    artifact_type="opsgraph_postmortem",
+                    content_text=json.dumps(
+                        {
+                            "postmortem_id": postmortem_row.postmortem_id,
+                            "incident_id": incident_id,
+                            "incident_key": incident_row.incident_key,
+                            "status": postmortem_row.status,
+                            "fact_set_version": incident_row.current_fact_set_version,
+                            "workflow_run_id": workflow_run_id,
+                            "replay_case_id": replay_case_id,
+                            "facts": [
+                                {
+                                    "fact_id": row.fact_id,
+                                    "fact_type": row.fact_type,
+                                    "statement": row.statement,
+                                }
+                                for row in fact_rows
+                            ],
+                            "timeline": [
+                                {
+                                    "event_id": row.event_id,
+                                    "kind": row.kind,
+                                    "summary": row.summary,
+                                }
+                                for row in timeline_rows
+                            ],
+                        },
+                        sort_keys=True,
+                    ),
+                    metadata_payload={
+                        "incident_id": incident_id,
+                        "postmortem_id": postmortem_row.postmortem_id,
+                        "replay_case_id": replay_case_id,
+                    },
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
 
     @staticmethod
     def _normalize_timestamp(value: datetime | None) -> datetime | None:

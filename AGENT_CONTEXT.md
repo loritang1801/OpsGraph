@@ -32,7 +32,7 @@
 - Comms draft listing now supports `channel` and `status` filters and exposes approval-task linkage plus created timestamps
 - Resolve/close transitions now enforce root-cause fact presence and resolved-before-close invariants
 - Replay runs now execute both incident-backed and replay-case-backed requests through the shared workflow replay path
-- Retrospective completion now persists a replay-case snapshot tied back to the postmortem row
+- Retrospective completion now persists a replay-case snapshot tied back to the postmortem row and writes a stored postmortem artifact payload
 - Replay cases can now be listed and fetched directly from product APIs for postmortem-to-replay navigation
 - Replay run listing can now also be filtered by `replay_case_id` and `status` for postmortem-specific replay tracking
 - Replay evaluation reports can now also be filtered by `replay_case_id` for postmortem-specific comparison views

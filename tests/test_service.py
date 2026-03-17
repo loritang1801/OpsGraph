@@ -14,7 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from opsgraph_app.bootstrap import build_app_service
-from opsgraph_app.repository import ApprovalTaskRow, CommsDraftRow, PostmortemRow, ReplayCaseRow
+from opsgraph_app.repository import ApprovalTaskRow, ArtifactBlobRow, CommsDraftRow, PostmortemRow, ReplayCaseRow
 from opsgraph_app.sample_payloads import (
     alert_ingest_command,
     close_incident_command,
@@ -428,12 +428,17 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(result.workflow_name, "opsgraph_retrospective")
         self.assertEqual(result.current_state, "retrospective_completed")
         self.assertEqual(postmortem.status, "draft")
+        self.assertIsNotNone(postmortem.artifact_id)
         self.assertEqual(workspace.incident.incident_status, "closed")
         self.assertIsNotNone(postmortem.replay_case_id)
         self.assertIsNotNone(postmortem_row.replay_case_id)
         self.assertIsNotNone(replay_case_row)
         self.assertEqual(replay_case_row.incident_id, "incident-1")
         self.assertEqual(replay_case_row.input_snapshot_payload["incident_id"], "incident-1")
+        artifact_row = session.get(ArtifactBlobRow, postmortem.artifact_id)
+        self.assertIsNotNone(artifact_row)
+        self.assertIn("incident_key", artifact_row.content_text)
+        self.assertIn("timeline", artifact_row.content_text)
 
     def test_list_and_get_replay_cases_from_postmortem_snapshot(self) -> None:
         service = build_app_service()
