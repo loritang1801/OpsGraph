@@ -41,6 +41,7 @@
 - Incident execution seeds now include persisted signal ids and summaries instead of empty signal placeholders
 - Alert and replay submission routes now return `202 Accepted`, `routes.py` contains explicit domain-error-to-HTTP mapping logic for product APIs, and a Grafana webhook alias now lands on the same ingest flow
 - Alert ingest responses now also surface accepted-signal counts plus synthetic workflow-run linkage for the queued enrichment path
+- Alert ingest now supports persisted webhook idempotency keys, and incident/replay/report list routes now expose shared envelope metadata with cursor pagination
 - Replay runs can now seed file-backed replay fixtures under `replay_fixtures/`, execute the shared `opsgraph_incident_response` workflow through `ReplayFixtureLoader`, and persist workflow run linkage/current state back to the replay row
 - Replay baseline capture and evaluation reporting are now implemented end-to-end, with baseline/replay report persistence, node-level diffs, derived mismatch metrics, latency deltas, and JSON/Markdown artifacts under `replay_reports/`
 - `scripts/run_replay_report.py` now runs local baseline capture -> replay -> compare and emits artifact paths in the returned report payload

@@ -9,7 +9,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from opsgraph_app.routes import map_domain_error
+from opsgraph_app.routes import map_domain_error, paginate_collection, success_envelope
 
 
 class OpsGraphRouteErrorMappingTests(unittest.TestCase):
@@ -57,6 +57,47 @@ class OpsGraphRouteErrorMappingTests(unittest.TestCase):
 
         self.assertEqual(status_code, 503)
         self.assertEqual(payload["error"]["code"], "REPLAY_EVALUATION_UNAVAILABLE")
+
+    def test_maps_idempotency_conflict_to_409(self) -> None:
+        status_code, payload = map_domain_error(
+            ValueError("IDEMPOTENCY_CONFLICT"),
+            path="/api/v1/opsgraph/alerts/prometheus",
+        )
+
+        self.assertEqual(status_code, 409)
+        self.assertEqual(payload["error"]["code"], "IDEMPOTENCY_CONFLICT")
+
+    def test_success_envelope_includes_cursor_and_request_metadata(self) -> None:
+        payload = success_envelope(
+            [{"id": "incident-1"}],
+            request_id="req-ops-1",
+            next_cursor="cursor-1",
+            has_more=True,
+        )
+
+        self.assertEqual(payload["data"][0]["id"], "incident-1")
+        self.assertEqual(payload["meta"]["request_id"], "req-ops-1")
+        self.assertEqual(payload["meta"]["next_cursor"], "cursor-1")
+        self.assertTrue(payload["meta"]["has_more"])
+
+    def test_paginate_collection_uses_cursor_metadata(self) -> None:
+        page_one, next_cursor, has_more = paginate_collection([1, 2, 3], limit=2)
+        page_two, second_cursor, second_has_more = paginate_collection(
+            [1, 2, 3],
+            cursor=next_cursor,
+            limit=2,
+        )
+
+        self.assertEqual(page_one, [1, 2])
+        self.assertTrue(has_more)
+        self.assertIsNotNone(next_cursor)
+        self.assertEqual(page_two, [3])
+        self.assertFalse(second_has_more)
+        self.assertIsNone(second_cursor)
+
+    def test_invalid_pagination_cursor_raises_contract_code(self) -> None:
+        with self.assertRaisesRegex(ValueError, "INVALID_CURSOR"):
+            paginate_collection([1, 2], cursor="bad-cursor", limit=1)
 
 
 if __name__ == "__main__":

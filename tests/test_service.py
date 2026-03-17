@@ -56,6 +56,53 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(ingest.accepted_signals, 1)
         self.assertIsNotNone(ingest.workflow_run_id)
 
+    def test_alert_ingest_is_idempotent_for_repeated_key(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        first = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="checkout-api:idempotent-alert",
+                summary="Idempotent alert",
+            ),
+            idempotency_key="ops-alert-1",
+        )
+        second = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="checkout-api:idempotent-alert",
+                summary="Idempotent alert",
+            ),
+            idempotency_key="ops-alert-1",
+        )
+        workspace = service.get_incident_workspace(first.incident_id)
+
+        matching = [item for item in workspace.signals if item.dedupe_key == "checkout-api:idempotent-alert"]
+        self.assertEqual(first.signal_id, second.signal_id)
+        self.assertEqual(first.workflow_run_id, second.workflow_run_id)
+        self.assertEqual(len(matching), 1)
+
+    def test_alert_ingest_rejects_idempotency_conflict(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="checkout-api:idempotency-conflict",
+                summary="First idempotent alert",
+            ),
+            idempotency_key="ops-alert-conflict",
+        )
+
+        with self.assertRaisesRegex(ValueError, "IDEMPOTENCY_CONFLICT"):
+            service.ingest_alert(
+                alert_ingest_command(
+                    correlation_key="checkout-api:idempotency-conflict",
+                    summary="Different idempotent alert payload",
+                    source="grafana",
+                ),
+                idempotency_key="ops-alert-conflict",
+            )
+
     def test_incident_workspace_contract_fields_serialize_with_aliases(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)

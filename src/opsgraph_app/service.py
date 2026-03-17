@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, TypeVar
 
 from .api_models import (
@@ -77,6 +79,40 @@ class OpsGraphAppService:
     @staticmethod
     def _to_run_response(result) -> OpsGraphRunResponse:
         return OpsGraphRunResponse.model_validate(result.model_dump())
+
+    @staticmethod
+    def _hash_request_payload(payload: dict[str, Any]) -> str:
+        normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def _load_idempotent_response(self, *, operation: str, idempotency_key: str | None, request_payload: dict[str, Any], model_type):
+        if not idempotency_key:
+            return None
+        payload = self.repository.load_idempotency_response(
+            operation=operation,
+            idempotency_key=idempotency_key,
+            request_hash=self._hash_request_payload(request_payload),
+        )
+        if payload is None:
+            return None
+        return model_type.model_validate(payload)
+
+    def _store_idempotent_response(
+        self,
+        *,
+        operation: str,
+        idempotency_key: str | None,
+        request_payload: dict[str, Any],
+        response_payload: dict[str, Any],
+    ) -> None:
+        if not idempotency_key:
+            return
+        self.repository.store_idempotency_response(
+            operation=operation,
+            idempotency_key=idempotency_key,
+            request_hash=self._hash_request_payload(request_payload),
+            response_payload=response_payload,
+        )
 
     def list_workflows(self):
         return self.workflow_api_service.list_workflows()
@@ -478,16 +514,37 @@ class OpsGraphAppService:
             report_artifact_path=artifact_path,
         )
 
-    def ingest_alert(self, command: AlertIngestCommand | dict[str, Any]) -> AlertIngestResponse:
+    def ingest_alert(
+        self,
+        command: AlertIngestCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> AlertIngestResponse:
         if isinstance(command, dict):
             command = AlertIngestCommand.model_validate(command)
-        return self.repository.ingest_alert(
+        request_payload = command.model_dump(mode="json")
+        cached = self._load_idempotent_response(
+            operation="opsgraph.ingest_alert",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=AlertIngestResponse,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.ingest_alert(
             ops_workspace_id=command.ops_workspace_id,
             correlation_key=command.correlation_key,
             summary=command.summary,
             observed_at=command.observed_at,
             source=command.source,
         )
+        self._store_idempotent_response(
+            operation="opsgraph.ingest_alert",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def respond_to_incident(self, command: IncidentResponseCommand | dict[str, Any]) -> OpsGraphRunResponse:
         command = self._coerce_command(command, IncidentResponseCommand)

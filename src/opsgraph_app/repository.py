@@ -201,6 +201,23 @@ class OpsGraphRepository(Protocol):
 
     def record_retrospective_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None: ...
 
+    def load_idempotency_response(
+        self,
+        *,
+        operation: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> dict[str, object] | None: ...
+
+    def store_idempotency_response(
+        self,
+        *,
+        operation: str,
+        idempotency_key: str,
+        request_hash: str,
+        response_payload: dict[str, object],
+    ) -> None: ...
+
 
 class Base(DeclarativeBase):
     pass
@@ -331,6 +348,18 @@ class ArtifactBlobRow(Base):
     artifact_type: Mapped[str] = mapped_column(String(80))
     content_text: Mapped[str] = mapped_column(Text)
     metadata_payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class IdempotencyKeyRow(Base):
+    __tablename__ = "opsgraph_idempotency_key"
+
+    record_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    operation: Mapped[str] = mapped_column(String(100), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), index=True)
+    request_hash: Mapped[str] = mapped_column(String(128))
+    response_payload: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
 
@@ -1825,6 +1854,50 @@ class SqlAlchemyOpsGraphRepository:
     @classmethod
     def _timestamps_match(cls, stored: datetime, expected: datetime) -> bool:
         return cls._normalize_timestamp(stored) == cls._normalize_timestamp(expected)
+
+    @staticmethod
+    def _idempotency_record_id(operation: str, idempotency_key: str) -> str:
+        return f"{operation}:{idempotency_key}"
+
+    def load_idempotency_response(
+        self,
+        *,
+        operation: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> dict[str, object] | None:
+        record_id = self._idempotency_record_id(operation, idempotency_key)
+        with self.session_factory() as session:
+            row = session.get(IdempotencyKeyRow, record_id)
+            if row is None:
+                return None
+            if row.request_hash != request_hash:
+                raise ValueError("IDEMPOTENCY_CONFLICT")
+            payload = row.response_payload if isinstance(row.response_payload, dict) else {}
+            return dict(payload)
+
+    def store_idempotency_response(
+        self,
+        *,
+        operation: str,
+        idempotency_key: str,
+        request_hash: str,
+        response_payload: dict[str, object],
+    ) -> None:
+        now = self._utcnow_naive()
+        record_id = self._idempotency_record_id(operation, idempotency_key)
+        with self.session_factory.begin() as session:
+            session.merge(
+                IdempotencyKeyRow(
+                    record_id=record_id,
+                    operation=operation,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    response_payload=dict(response_payload),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
 
     @staticmethod
     def _build_incident_execution_seed(session: Session, incident_row: IncidentRow) -> dict[str, object]:
