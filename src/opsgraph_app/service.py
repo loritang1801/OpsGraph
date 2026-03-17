@@ -871,6 +871,18 @@ class OpsGraphAppService:
             workflow_run_id=response.workflow_run_id,
             checkpoint_seq=response.checkpoint_seq,
         )
+        self._emit_incident_event(
+            incident_id=command.incident_id,
+            event_name="opsgraph.incident.updated",
+            aggregate_type="incident",
+            aggregate_id=command.incident_id,
+            node_name="incident_response_completed",
+            workflow_run_id=response.workflow_run_id,
+            payload={
+                "current_state": response.current_state,
+                "workflow_type": response.workflow_type,
+            },
+        )
         return response
 
     def build_retrospective(self, command: RetrospectiveCommand | dict[str, Any]) -> OpsGraphRunResponse:
@@ -897,6 +909,21 @@ class OpsGraphAppService:
             incident_id=command.incident_id,
             workflow_run_id=response.workflow_run_id,
             checkpoint_seq=response.checkpoint_seq,
+        )
+        postmortem = self.repository.get_postmortem(command.incident_id)
+        self._emit_incident_event(
+            incident_id=command.incident_id,
+            event_name="opsgraph.postmortem.ready",
+            aggregate_type="postmortem",
+            aggregate_id=postmortem.postmortem_id,
+            node_name="retrospective_completed",
+            workflow_run_id=response.workflow_run_id,
+            payload={
+                "postmortem_id": postmortem.postmortem_id,
+                "fact_set_version": postmortem.fact_set_version,
+                "postmortem_status": postmortem.status,
+                "artifact_id": postmortem.artifact_id,
+            },
         )
         return response
 

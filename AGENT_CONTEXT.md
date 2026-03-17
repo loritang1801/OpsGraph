@@ -44,6 +44,7 @@
 - Alert ingest now supports persisted webhook idempotency keys, and incident/replay/report list routes now expose shared envelope metadata with cursor pagination
 - Fact add/retract, severity override, hypothesis decision, comms publish, resolve/close, and replay-run submission now also support persisted idempotency keys, and the remaining incident/replay read routes now emit shared envelopes instead of bare payloads
 - Incident mutations now also emit product outbox events for incident updates, hypothesis updates, and comms publish so the SSE stream reflects operator actions beyond webhook ingest
+- Workflow-backed incident response now emits incident-update events on completion, and retrospective completion emits `opsgraph.postmortem.ready` with the stored postmortem artifact context
 - Shared health/workflow endpoints now also emit shared envelopes, `/api/v1/events/stream` now supports workspace/incident topic aliases with payload-backed event context fallback, and replay status updates now reject terminal-state regressions with `REPLAY_STATUS_CONFLICT`
 - Replay runs can now seed file-backed replay fixtures under `replay_fixtures/`, execute the shared `opsgraph_incident_response` workflow through `ReplayFixtureLoader`, and persist workflow run linkage/current state back to the replay row
 - Replay baseline capture and evaluation reporting are now implemented end-to-end, with baseline/replay report persistence, node-level diffs, derived mismatch metrics, latency deltas, and JSON/Markdown artifacts under `replay_reports/`

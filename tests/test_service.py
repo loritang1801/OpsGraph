@@ -575,6 +575,21 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(state.current_state, "resolve")
         self.assertEqual(state.workflow_type, "opsgraph_incident")
 
+    def test_respond_to_incident_emits_incident_updated_event(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.respond_to_incident(incident_response_command(workflow_run_id="opsgraph-event-respond-1"))
+        pending = service.runtime_stores.outbox_store.list_pending()
+        matching = [
+            item.event
+            for item in pending
+            if item.event.workflow_run_id == "opsgraph-event-respond-1"
+            and item.event.event_name == "opsgraph.incident.updated"
+        ]
+
+        self.assertTrue(any(event.payload.get("current_state") == "resolve" for event in matching))
+
     def test_build_retrospective_from_domain_command(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
@@ -605,6 +620,22 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertIsNotNone(artifact_row)
         self.assertIn("incident_key", artifact_row.content_text)
         self.assertIn("timeline", artifact_row.content_text)
+
+    def test_build_retrospective_emits_postmortem_ready_event(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.resolve_incident("incident-1", resolve_incident_command())
+        service.build_retrospective(retrospective_command(workflow_run_id="opsgraph-event-retro-1"))
+        pending = service.runtime_stores.outbox_store.list_pending()
+        matching = [
+            item.event
+            for item in pending
+            if item.event.workflow_run_id == "opsgraph-event-retro-1"
+            and item.event.event_name == "opsgraph.postmortem.ready"
+        ]
+
+        self.assertTrue(any(event.payload.get("postmortem_status") == "draft" for event in matching))
 
     def test_list_and_get_replay_cases_from_postmortem_snapshot(self) -> None:
         service = build_app_service()
