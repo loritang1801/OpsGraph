@@ -153,6 +153,39 @@ class OpsGraphServiceTests(unittest.TestCase):
                 fact_create_command() | {"expected_fact_set_version": 2},
             )
 
+    def test_add_fact_is_idempotent_for_repeated_key(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        first = service.add_fact(
+            "incident-1",
+            fact_create_command(),
+            idempotency_key="fact-add-1",
+        )
+        second = service.add_fact(
+            "incident-1",
+            fact_create_command(),
+            idempotency_key="fact-add-1",
+        )
+
+        self.assertEqual(first.fact_id, second.fact_id)
+        self.assertEqual(first.current_fact_set_version, second.current_fact_set_version)
+
+    def test_start_replay_run_rejects_idempotency_conflict(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.start_replay_run(
+            replay_run_command(),
+            idempotency_key="replay-run-conflict",
+        )
+
+        with self.assertRaisesRegex(ValueError, "IDEMPOTENCY_CONFLICT"):
+            service.start_replay_run(
+                replay_run_command(model_bundle_version="opsgraph-bundle-v2"),
+                idempotency_key="replay-run-conflict",
+            )
+
     def test_fact_hypothesis_recommendation_comms_and_replay_mutations(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)

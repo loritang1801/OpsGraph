@@ -239,20 +239,57 @@ def create_fastapi_app(service: OpsGraphAppService):
         )
 
     @app.get("/api/v1/opsgraph/incidents/{incident_id}/hypotheses")
-    def list_hypotheses(incident_id: str) -> list[HypothesisSummary]:
-        return service.list_hypotheses(incident_id)
+    def list_hypotheses(
+        incident_id: str,
+        cursor: str | None = None,
+        limit: int = DEFAULT_PAGE_LIMIT,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        items = service.list_hypotheses(incident_id)
+        page_items, next_cursor, has_more = paginate_collection(items, cursor=cursor, limit=limit)
+        return success_envelope(
+            page_items,
+            request_id=request_id,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
 
-    @app.post("/api/v1/opsgraph/incidents/{incident_id}/facts", response_model=FactMutationResponse)
-    def add_fact(incident_id: str, command: FactCreateCommand) -> FactMutationResponse:
-        return service.add_fact(incident_id, command)
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/facts")
+    def add_fact(
+        incident_id: str,
+        command: FactCreateCommand,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.add_fact(incident_id, command, idempotency_key=idempotency_key),
+            request_id=request_id,
+        )
 
-    @app.post("/api/v1/opsgraph/incidents/{incident_id}/facts/{fact_id}/retract", response_model=FactMutationResponse)
-    def retract_fact(incident_id: str, fact_id: str, command: FactRetractCommand) -> FactMutationResponse:
-        return service.retract_fact(incident_id, fact_id, command)
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/facts/{fact_id}/retract")
+    def retract_fact(
+        incident_id: str,
+        fact_id: str,
+        command: FactRetractCommand,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.retract_fact(incident_id, fact_id, command, idempotency_key=idempotency_key),
+            request_id=request_id,
+        )
 
-    @app.post("/api/v1/opsgraph/incidents/{incident_id}/severity", response_model=IncidentSummary)
-    def override_severity(incident_id: str, command: SeverityOverrideCommand) -> IncidentSummary:
-        return service.override_severity(incident_id, command)
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/severity")
+    def override_severity(
+        incident_id: str,
+        command: SeverityOverrideCommand,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.override_severity(incident_id, command, idempotency_key=idempotency_key),
+            request_id=request_id,
+        )
 
     @app.post(
         "/api/v1/opsgraph/incidents/{incident_id}/hypotheses/{hypothesis_id}/decision",
@@ -262,20 +299,60 @@ def create_fastapi_app(service: OpsGraphAppService):
         incident_id: str,
         hypothesis_id: str,
         command: HypothesisDecisionCommand,
-    ) -> HypothesisDecisionResponse:
-        return service.decide_hypothesis(incident_id, hypothesis_id, command)
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.decide_hypothesis(
+                incident_id,
+                hypothesis_id,
+                command,
+                idempotency_key=idempotency_key,
+            ),
+            request_id=request_id,
+        )
 
     @app.get("/api/v1/opsgraph/incidents/{incident_id}/recommendations")
-    def list_recommendations(incident_id: str) -> list[RecommendationSummary]:
-        return service.list_recommendations(incident_id)
+    def list_recommendations(
+        incident_id: str,
+        cursor: str | None = None,
+        limit: int = DEFAULT_PAGE_LIMIT,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        items = service.list_recommendations(incident_id)
+        page_items, next_cursor, has_more = paginate_collection(items, cursor=cursor, limit=limit)
+        return success_envelope(
+            page_items,
+            request_id=request_id,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
 
-    @app.get("/api/v1/opsgraph/incidents/{incident_id}/approval-tasks", response_model=list[ApprovalTaskSummary])
-    def list_approval_tasks(incident_id: str) -> list[ApprovalTaskSummary]:
-        return service.list_approval_tasks(incident_id)
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/approval-tasks")
+    def list_approval_tasks(
+        incident_id: str,
+        cursor: str | None = None,
+        limit: int = DEFAULT_PAGE_LIMIT,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        items = service.list_approval_tasks(incident_id)
+        page_items, next_cursor, has_more = paginate_collection(items, cursor=cursor, limit=limit)
+        return success_envelope(
+            page_items,
+            request_id=request_id,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
 
-    @app.get("/api/v1/opsgraph/approval-tasks/{approval_task_id}", response_model=ApprovalTaskSummary)
-    def get_approval_task(approval_task_id: str) -> ApprovalTaskSummary:
-        return service.get_approval_task(approval_task_id)
+    @app.get("/api/v1/opsgraph/approval-tasks/{approval_task_id}")
+    def get_approval_task(
+        approval_task_id: str,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.get_approval_task(approval_task_id),
+            request_id=request_id,
+        )
 
     @app.post(
         "/api/v1/opsgraph/incidents/{incident_id}/recommendations/{recommendation_id}/decision",
@@ -293,39 +370,92 @@ def create_fastapi_app(service: OpsGraphAppService):
         incident_id: str,
         channel: str | None = None,
         status: str | None = None,
-    ) -> list[CommsDraftSummary]:
-        return service.list_comms(incident_id, channel=channel, status=status)
+        cursor: str | None = None,
+        limit: int = DEFAULT_PAGE_LIMIT,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        items = service.list_comms(incident_id, channel=channel, status=status)
+        page_items, next_cursor, has_more = paginate_collection(items, cursor=cursor, limit=limit)
+        return success_envelope(
+            page_items,
+            request_id=request_id,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
 
-    @app.post("/api/v1/opsgraph/incidents/{incident_id}/comms/{draft_id}/publish", response_model=CommsPublishResponse)
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/comms/{draft_id}/publish")
     def publish_comms(
         incident_id: str,
         draft_id: str,
         command: CommsPublishCommand,
-    ) -> CommsPublishResponse:
-        return service.publish_comms(incident_id, draft_id, command)
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.publish_comms(incident_id, draft_id, command, idempotency_key=idempotency_key),
+            request_id=request_id,
+        )
 
-    @app.post("/api/v1/opsgraph/incidents/{incident_id}/resolve", response_model=IncidentSummary)
-    def resolve_incident(incident_id: str, command: ResolveIncidentCommand) -> IncidentSummary:
-        return service.resolve_incident(incident_id, command)
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/resolve")
+    def resolve_incident(
+        incident_id: str,
+        command: ResolveIncidentCommand,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.resolve_incident(incident_id, command, idempotency_key=idempotency_key),
+            request_id=request_id,
+        )
 
-    @app.post("/api/v1/opsgraph/incidents/{incident_id}/close", response_model=IncidentSummary)
-    def close_incident(incident_id: str, command: CloseIncidentCommand) -> IncidentSummary:
-        return service.close_incident(incident_id, command)
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/close")
+    def close_incident(
+        incident_id: str,
+        command: CloseIncidentCommand,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.close_incident(incident_id, command, idempotency_key=idempotency_key),
+            request_id=request_id,
+        )
 
-    @app.get("/api/v1/opsgraph/incidents/{incident_id}/postmortem", response_model=PostmortemSummary)
-    def get_postmortem(incident_id: str) -> PostmortemSummary:
-        return service.get_postmortem(incident_id)
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/postmortem")
+    def get_postmortem(
+        incident_id: str,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.get_postmortem(incident_id),
+            request_id=request_id,
+        )
 
-    @app.get("/api/v1/opsgraph/replay-cases", response_model=list[ReplayCaseSummary])
+    @app.get("/api/v1/opsgraph/replay-cases")
     def list_replay_cases(
         workspace_id: str,
         incident_id: str | None = None,
-    ) -> list[ReplayCaseSummary]:
-        return service.list_replay_cases(workspace_id, incident_id)
+        cursor: str | None = None,
+        limit: int = DEFAULT_PAGE_LIMIT,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        items = service.list_replay_cases(workspace_id, incident_id)
+        page_items, next_cursor, has_more = paginate_collection(items, cursor=cursor, limit=limit)
+        return success_envelope(
+            page_items,
+            request_id=request_id,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
 
-    @app.get("/api/v1/opsgraph/replay-cases/{replay_case_id}", response_model=ReplayCaseDetail)
-    def get_replay_case(replay_case_id: str) -> ReplayCaseDetail:
-        return service.get_replay_case(replay_case_id)
+    @app.get("/api/v1/opsgraph/replay-cases/{replay_case_id}")
+    def get_replay_case(
+        replay_case_id: str,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.get_replay_case(replay_case_id),
+            request_id=request_id,
+        )
 
     @app.post("/api/v1/opsgraph/incidents/respond", response_model=OpsGraphRunResponse)
     def respond_to_incident(command: IncidentResponseCommand) -> OpsGraphRunResponse:
@@ -335,9 +465,18 @@ def create_fastapi_app(service: OpsGraphAppService):
     def build_retrospective(command: RetrospectiveCommand) -> OpsGraphRunResponse:
         return service.build_retrospective(command)
 
-    @app.post("/api/v1/opsgraph/replays/run", response_model=ReplayRunSummary, status_code=202)
-    def start_replay_run(command: ReplayRunCommand) -> ReplayRunSummary:
-        return service.start_replay_run(command)
+    @app.post("/api/v1/opsgraph/replays/run", status_code=202)
+    def start_replay_run(
+        command: ReplayRunCommand,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        response = service.start_replay_run(command, idempotency_key=idempotency_key)
+        return success_envelope(
+            response,
+            request_id=request_id,
+            workflow_run_id=response.workflow_run_id,
+        )
 
     @app.get("/api/v1/opsgraph/replays")
     def list_replays(
@@ -362,8 +501,18 @@ def create_fastapi_app(service: OpsGraphAppService):
     def list_replay_baselines(
         workspace_id: str,
         incident_id: str | None = None,
-    ) -> list[ReplayBaselineSummary]:
-        return service.list_replay_baselines(workspace_id, incident_id)
+        cursor: str | None = None,
+        limit: int = DEFAULT_PAGE_LIMIT,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        items = service.list_replay_baselines(workspace_id, incident_id)
+        page_items, next_cursor, has_more = paginate_collection(items, cursor=cursor, limit=limit)
+        return success_envelope(
+            page_items,
+            request_id=request_id,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
 
     @app.post("/api/v1/opsgraph/replays/baselines/capture", response_model=ReplayBaselineSummary)
     def capture_replay_baseline(command: ReplayBaselineCaptureCommand) -> ReplayBaselineSummary:

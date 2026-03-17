@@ -160,39 +160,115 @@ class OpsGraphAppService:
         self,
         incident_id: str,
         command: FactCreateCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
     ) -> FactMutationResponse:
         if isinstance(command, dict):
             command = FactCreateCommand.model_validate(command)
-        return self.repository.add_fact(incident_id, command)
+        request_payload = {"incident_id": incident_id, **command.model_dump(mode="json")}
+        cached = self._load_idempotent_response(
+            operation="opsgraph.add_fact",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=FactMutationResponse,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.add_fact(incident_id, command)
+        self._store_idempotent_response(
+            operation="opsgraph.add_fact",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def retract_fact(
         self,
         incident_id: str,
         fact_id: str,
         command: FactRetractCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
     ) -> FactMutationResponse:
         if isinstance(command, dict):
             command = FactRetractCommand.model_validate(command)
-        return self.repository.retract_fact(incident_id, fact_id, command)
+        request_payload = {"incident_id": incident_id, "fact_id": fact_id, **command.model_dump(mode="json")}
+        cached = self._load_idempotent_response(
+            operation="opsgraph.retract_fact",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=FactMutationResponse,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.retract_fact(incident_id, fact_id, command)
+        self._store_idempotent_response(
+            operation="opsgraph.retract_fact",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def override_severity(
         self,
         incident_id: str,
         command: SeverityOverrideCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
     ) -> IncidentSummary:
         if isinstance(command, dict):
             command = SeverityOverrideCommand.model_validate(command)
-        return self.repository.override_severity(incident_id, command)
+        request_payload = {"incident_id": incident_id, **command.model_dump(mode="json")}
+        cached = self._load_idempotent_response(
+            operation="opsgraph.override_severity",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=IncidentSummary,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.override_severity(incident_id, command)
+        self._store_idempotent_response(
+            operation="opsgraph.override_severity",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def decide_hypothesis(
         self,
         incident_id: str,
         hypothesis_id: str,
         command: HypothesisDecisionCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
     ) -> HypothesisDecisionResponse:
         if isinstance(command, dict):
             command = HypothesisDecisionCommand.model_validate(command)
-        return self.repository.decide_hypothesis(incident_id, hypothesis_id, command)
+        request_payload = {
+            "incident_id": incident_id,
+            "hypothesis_id": hypothesis_id,
+            **command.model_dump(mode="json"),
+        }
+        cached = self._load_idempotent_response(
+            operation="opsgraph.decide_hypothesis",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=HypothesisDecisionResponse,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.decide_hypothesis(incident_id, hypothesis_id, command)
+        self._store_idempotent_response(
+            operation="opsgraph.decide_hypothesis",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def decide_recommendation(
         self,
@@ -209,36 +285,111 @@ class OpsGraphAppService:
         incident_id: str,
         draft_id: str,
         command: CommsPublishCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
     ) -> CommsPublishResponse:
         if isinstance(command, dict):
             command = CommsPublishCommand.model_validate(command)
-        return self.repository.publish_comms(incident_id, draft_id, command)
+        request_payload = {"incident_id": incident_id, "draft_id": draft_id, **command.model_dump(mode="json")}
+        cached = self._load_idempotent_response(
+            operation="opsgraph.publish_comms",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=CommsPublishResponse,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.publish_comms(incident_id, draft_id, command)
+        self._store_idempotent_response(
+            operation="opsgraph.publish_comms",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def resolve_incident(
         self,
         incident_id: str,
         command: ResolveIncidentCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
     ) -> IncidentSummary:
         if isinstance(command, dict):
             command = ResolveIncidentCommand.model_validate(command)
-        return self.repository.resolve_incident(incident_id, command)
+        request_payload = {"incident_id": incident_id, **command.model_dump(mode="json")}
+        cached = self._load_idempotent_response(
+            operation="opsgraph.resolve_incident",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=IncidentSummary,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.resolve_incident(incident_id, command)
+        self._store_idempotent_response(
+            operation="opsgraph.resolve_incident",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def close_incident(
         self,
         incident_id: str,
         command: CloseIncidentCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
     ) -> IncidentSummary:
         if isinstance(command, dict):
             command = CloseIncidentCommand.model_validate(command)
-        return self.repository.close_incident(incident_id, command)
+        request_payload = {"incident_id": incident_id, **command.model_dump(mode="json")}
+        cached = self._load_idempotent_response(
+            operation="opsgraph.close_incident",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=IncidentSummary,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.close_incident(incident_id, command)
+        self._store_idempotent_response(
+            operation="opsgraph.close_incident",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def get_postmortem(self, incident_id: str) -> PostmortemSummary:
         return self.repository.get_postmortem(incident_id)
 
-    def start_replay_run(self, command: ReplayRunCommand | dict[str, Any]) -> ReplayRunSummary:
+    def start_replay_run(
+        self,
+        command: ReplayRunCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> ReplayRunSummary:
         if isinstance(command, dict):
             command = ReplayRunCommand.model_validate(command)
-        return self.repository.start_replay_run(command)
+        request_payload = command.model_dump(mode="json")
+        cached = self._load_idempotent_response(
+            operation="opsgraph.start_replay_run",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=ReplayRunSummary,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.start_replay_run(command)
+        self._store_idempotent_response(
+            operation="opsgraph.start_replay_run",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def list_replays(
         self,
