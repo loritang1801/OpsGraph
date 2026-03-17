@@ -287,6 +287,8 @@ class RecommendationDecisionCommand(OpsGraphModel):
 class RecommendationDecisionResponse(OpsGraphModel):
     recommendation_id: str
     status: str
+    approval_task_id: str | None = None
+    approval_status: str | None = None
 
 
 class ResolveIncidentCommand(OpsGraphModel):

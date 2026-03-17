@@ -723,6 +723,8 @@ Payload:
 
 #### `opsgraph.approval.updated`
 
+Producer: recommendation decision API
+
 Payload:
 
 ```json

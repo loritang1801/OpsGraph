@@ -199,7 +199,12 @@ class OpsGraphRepository(Protocol):
         report_artifact_path: str,
     ) -> ReplayEvaluationSummary: ...
 
-    def record_incident_response_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None: ...
+    def record_incident_response_result(
+        self,
+        incident_id: str,
+        workflow_run_id: str,
+        checkpoint_seq: int,
+    ) -> dict[str, object]: ...
 
     def record_retrospective_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None: ...
 
@@ -1204,6 +1209,8 @@ class SqlAlchemyOpsGraphRepository:
             return RecommendationDecisionResponse(
                 recommendation_id=recommendation_id,
                 status=recommendation_row.status,
+                approval_task_id=recommendation_row.approval_task_id,
+                approval_status=approval_row.status if approval_row is not None else None,
             )
 
     def publish_comms(
@@ -1673,7 +1680,12 @@ class SqlAlchemyOpsGraphRepository:
                 raise KeyError(incident_id)
             return self._build_incident_execution_seed(session, incident_row)
 
-    def record_incident_response_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None:
+    def record_incident_response_result(
+        self,
+        incident_id: str,
+        workflow_run_id: str,
+        checkpoint_seq: int,
+    ) -> dict[str, object]:
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
@@ -1684,11 +1696,16 @@ class SqlAlchemyOpsGraphRepository:
             incident_row.severity = "sev1"
             incident_row.latest_workflow_run_id = workflow_run_id
             incident_row.updated_at = self._utcnow_naive()
+            generated_hypothesis_ids: list[str] = []
+            generated_recommendation_id: str | None = None
+            generated_approval_task_id: str | None = None
+            generated_draft_id: str | None = None
 
             hypothesis_exists = session.scalar(
                 select(HypothesisRow.hypothesis_id).where(HypothesisRow.incident_id == incident_id).limit(1)
             )
             if hypothesis_exists is None:
+                generated_hypothesis_ids.append("hypothesis-generated-1")
                 session.add(
                     HypothesisRow(
                         hypothesis_id="hypothesis-generated-1",
@@ -1713,6 +1730,8 @@ class SqlAlchemyOpsGraphRepository:
             approval_task_id = recommendation_row.approval_task_id if recommendation_row is not None else None
             if recommendation_row is None:
                 approval_task_id = f"approval-task-{uuid4().hex[:8]}"
+                generated_recommendation_id = "recommendation-generated-1"
+                generated_approval_task_id = approval_task_id
                 session.add(
                     RecommendationRow(
                         recommendation_id="recommendation-generated-1",
@@ -1744,6 +1763,7 @@ class SqlAlchemyOpsGraphRepository:
                 select(CommsDraftRow.draft_id).where(CommsDraftRow.incident_id == incident_id).limit(1)
             )
             if comms_exists is None:
+                generated_draft_id = "draft-generated-1"
                 session.add(
                     CommsDraftRow(
                         draft_id="draft-generated-1",
@@ -1758,6 +1778,14 @@ class SqlAlchemyOpsGraphRepository:
                         updated_at=self._utcnow_naive(),
                     )
                 )
+            return {
+                "generated_hypothesis_ids": generated_hypothesis_ids,
+                "recommendation_id": generated_recommendation_id,
+                "approval_task_id": generated_approval_task_id,
+                "draft_id": generated_draft_id,
+                "draft_channel": "internal_slack" if generated_draft_id is not None else None,
+                "draft_fact_set_version": incident_row.current_fact_set_version if generated_draft_id is not None else None,
+            }
 
     def record_retrospective_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None:
         now = datetime.now(UTC)

@@ -27,6 +27,7 @@
 - Incident, signal, fact, recommendation, and comms resource models now serialize with contract-aligned id/status/service/channel aliases, and incident reads now expose `acknowledged_at`
 - Recommendation approval now bridges through a persisted approval-task row linked to recommendation state
 - Approval tasks can now be listed per incident and fetched directly for operator workbench/read-side integrations
+- Recommendation approval decisions now emit `opsgraph.approval.updated`, and incident-response completion emits `opsgraph.approval.requested` when the workflow materializes a new approval task
 - Incident workspace reads now include persisted signals and approval tasks alongside recommendations, comms drafts, and timeline data
 - Recommendation execution now enforces tighter terminal-state and approval-task conflict rules
 - Workflow-generated comms drafts now inherit the generated recommendation approval task, and comms publish rejects stale fact-set drafts and requires the bound approved approval task when present

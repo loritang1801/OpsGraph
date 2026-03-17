@@ -350,8 +350,26 @@ class OpsGraphAppService:
             payload={
                 "recommendation_id": recommendation_id,
                 "recommendation_status": response.status,
+                "approval_task_id": response.approval_task_id,
             },
         )
+        if response.approval_task_id is not None and response.approval_status is not None and command.decision in {
+            "approve",
+            "reject",
+        }:
+            self._emit_incident_event(
+                incident_id=incident_id,
+                event_name="opsgraph.approval.updated",
+                aggregate_type="approval_task",
+                aggregate_id=response.approval_task_id,
+                node_name="approval_task_updated",
+                payload={
+                    "approval_task_id": response.approval_task_id,
+                    "recommendation_id": recommendation_id,
+                    "status": response.approval_status,
+                    "decision": command.decision,
+                },
+            )
         self._store_idempotent_response(
             operation="opsgraph.decide_recommendation",
             idempotency_key=idempotency_key,
@@ -866,11 +884,27 @@ class OpsGraphAppService:
             }
         )
         response = self._to_run_response(result)
-        self.repository.record_incident_response_result(
+        generation_result = self.repository.record_incident_response_result(
             incident_id=command.incident_id,
             workflow_run_id=response.workflow_run_id,
             checkpoint_seq=response.checkpoint_seq,
         )
+        approval_task_id = generation_result.get("approval_task_id")
+        recommendation_id = generation_result.get("recommendation_id")
+        if approval_task_id is not None and recommendation_id is not None:
+            self._emit_incident_event(
+                incident_id=command.incident_id,
+                event_name="opsgraph.approval.requested",
+                aggregate_type="approval_task",
+                aggregate_id=str(approval_task_id),
+                node_name="approval_requested",
+                workflow_run_id=response.workflow_run_id,
+                payload={
+                    "approval_task_id": str(approval_task_id),
+                    "subject_type": "runbook_recommendation",
+                    "subject_id": str(recommendation_id),
+                },
+            )
         self._emit_incident_event(
             incident_id=command.incident_id,
             event_name="opsgraph.incident.updated",

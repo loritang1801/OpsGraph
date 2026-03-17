@@ -252,6 +252,8 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(retracted_fact.status, "retracted")
         self.assertEqual(hypothesis.status, "accepted")
         self.assertEqual(recommendation.status, "approved")
+        self.assertEqual(recommendation.approval_task_id, "approval-task-1")
+        self.assertEqual(recommendation.approval_status, "approved")
         self.assertEqual(severity.severity, "sev2")
         self.assertEqual(published.status, "published")
         self.assertEqual(replay.status, "queued")
@@ -293,6 +295,26 @@ class OpsGraphServiceTests(unittest.TestCase):
 
         self.assertEqual(published.status, "published")
         self.assertTrue(any(event.payload.get("comms_status") == "published" for event in matching))
+
+    def test_decide_recommendation_emits_approval_updated_outbox_event(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        recommendation = service.decide_recommendation(
+            "incident-1",
+            "recommendation-1",
+            recommendation_decision_command(),
+        )
+        pending = service.runtime_stores.outbox_store.list_pending()
+        matching = [
+            item.event
+            for item in pending
+            if item.event.event_name == "opsgraph.approval.updated"
+            and item.event.payload.get("approval_task_id") == "approval-task-1"
+        ]
+
+        self.assertEqual(recommendation.approval_status, "approved")
+        self.assertTrue(any(event.payload.get("status") == "approved" for event in matching))
 
     def test_incident_execution_seed_uses_persisted_signals(self) -> None:
         service = build_app_service()
@@ -589,6 +611,32 @@ class OpsGraphServiceTests(unittest.TestCase):
         ]
 
         self.assertTrue(any(event.payload.get("current_state") == "resolve" for event in matching))
+
+    def test_respond_to_incident_emits_generated_approval_requested_event(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        ingest = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="payments-api:latency-surge",
+                summary="Payments API latency surge",
+                source="grafana",
+            )
+        )
+        command = service.repository.get_incident_execution_seed(ingest.incident_id) | {
+            "workflow_run_id": "opsgraph-generated-events-1"
+        }
+        service.respond_to_incident(command)
+        pending = service.runtime_stores.outbox_store.list_pending()
+
+        approval_events = [
+            item.event
+            for item in pending
+            if item.event.workflow_run_id == "opsgraph-generated-events-1"
+            and item.event.event_name == "opsgraph.approval.requested"
+        ]
+        self.assertEqual(len(approval_events), 1)
+        self.assertEqual(approval_events[0].payload.get("subject_type"), "runbook_recommendation")
 
     def test_build_retrospective_from_domain_command(self) -> None:
         service = build_app_service()
