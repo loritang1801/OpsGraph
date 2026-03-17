@@ -2,13 +2,18 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$TargetRepoPath,
 
+    [string]$SourceRoot = (Split-Path -Parent $PSScriptRoot),
+
     [string]$DestinationName = "shared_core"
 )
 
-$sourceRoot = Split-Path -Parent $PSScriptRoot
 $destinationRoot = Join-Path $TargetRepoPath $DestinationName
 $excludedRootNames = @(".git", "__pycache__", ".pytest_cache", ".venv", "dist", "build")
 $excludedDirNames = @("__pycache__", ".pytest_cache", ".venv", "dist", "build")
+
+if (-not (Test-Path $SourceRoot)) {
+    throw "Source root does not exist: $SourceRoot"
+}
 
 if (-not (Test-Path $TargetRepoPath)) {
     throw "Target repo path does not exist: $TargetRepoPath"
@@ -20,7 +25,7 @@ if (Test-Path $destinationRoot) {
 
 New-Item -ItemType Directory -Path $destinationRoot | Out-Null
 
-Get-ChildItem -Force $sourceRoot |
+Get-ChildItem -Force $SourceRoot |
     Where-Object { $_.Name -notin $excludedRootNames } |
     ForEach-Object {
         Copy-Item -Recurse -Force $_.FullName $destinationRoot

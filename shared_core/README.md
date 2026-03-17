@@ -17,7 +17,7 @@ When `AuditFlow` and `OpsGraph` become separate GitHub repositories, vendoring s
 
 ## Workspace Sync
 
-From `D:\project`, sync the current shared core into both product repos with:
+From the multi-repo workspace root such as `D:\project`, sync the current shared core into both product repos with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\SharedAgentCore\scripts\sync_workspace_repos.ps1
