@@ -20,6 +20,7 @@ ERROR_STATUS_BY_CODE = {
 from .api_models import (
     AlertIngestCommand,
     AlertIngestResponse,
+    ApprovalTaskSummary,
     CloseIncidentCommand,
     CommsDraftSummary,
     CommsPublishCommand,
@@ -147,6 +148,14 @@ def create_fastapi_app(service: OpsGraphAppService):
     @app.get("/api/v1/opsgraph/incidents/{incident_id}/recommendations")
     def list_recommendations(incident_id: str) -> list[RecommendationSummary]:
         return service.list_recommendations(incident_id)
+
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/approval-tasks", response_model=list[ApprovalTaskSummary])
+    def list_approval_tasks(incident_id: str) -> list[ApprovalTaskSummary]:
+        return service.list_approval_tasks(incident_id)
+
+    @app.get("/api/v1/opsgraph/approval-tasks/{approval_task_id}", response_model=ApprovalTaskSummary)
+    def get_approval_task(approval_task_id: str) -> ApprovalTaskSummary:
+        return service.get_approval_task(approval_task_id)
 
     @app.post(
         "/api/v1/opsgraph/incidents/{incident_id}/recommendations/{recommendation_id}/decision",

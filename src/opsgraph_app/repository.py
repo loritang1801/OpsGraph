@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .api_models import (
+    ApprovalTaskSummary,
     AlertIngestResponse,
     CommsDraftSummary,
     CommsPublishCommand,
@@ -53,6 +54,10 @@ class OpsGraphRepository(Protocol):
     def list_recommendations(self, incident_id: str) -> list[RecommendationSummary]: ...
 
     def list_comms(self, incident_id: str) -> list[CommsDraftSummary]: ...
+
+    def list_approval_tasks(self, incident_id: str) -> list[ApprovalTaskSummary]: ...
+
+    def get_approval_task(self, approval_task_id: str) -> ApprovalTaskSummary: ...
 
     def ingest_alert(
         self,
@@ -556,6 +561,18 @@ class SqlAlchemyOpsGraphRepository:
         )
 
     @staticmethod
+    def _to_approval_task(row: ApprovalTaskRow) -> ApprovalTaskSummary:
+        return ApprovalTaskSummary(
+            approval_task_id=row.approval_task_id,
+            incident_id=row.incident_id,
+            recommendation_id=row.recommendation_id,
+            status=row.status,
+            comment=row.comment,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
     def _to_postmortem(row: PostmortemRow) -> PostmortemSummary:
         return PostmortemSummary(
             postmortem_id=row.postmortem_id,
@@ -729,6 +746,25 @@ class SqlAlchemyOpsGraphRepository:
                 .order_by(CommsDraftRow.draft_id.asc())
             ).all()
             return [self._to_comms(row) for row in rows]
+
+    def list_approval_tasks(self, incident_id: str) -> list[ApprovalTaskSummary]:
+        with self.session_factory() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            rows = session.scalars(
+                select(ApprovalTaskRow)
+                .where(ApprovalTaskRow.incident_id == incident_id)
+                .order_by(ApprovalTaskRow.created_at.asc())
+            ).all()
+            return [self._to_approval_task(row) for row in rows]
+
+    def get_approval_task(self, approval_task_id: str) -> ApprovalTaskSummary:
+        with self.session_factory() as session:
+            row = session.get(ApprovalTaskRow, approval_task_id)
+            if row is None:
+                raise KeyError(approval_task_id)
+            return self._to_approval_task(row)
 
     def ingest_alert(
         self,

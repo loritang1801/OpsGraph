@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, TypeVar
 
 from .api_models import (
+    ApprovalTaskSummary,
     AlertIngestCommand,
     AlertIngestResponse,
     CloseIncidentCommand,
@@ -94,6 +95,12 @@ class OpsGraphAppService:
 
     def list_comms(self, incident_id: str) -> list[CommsDraftSummary]:
         return self.repository.list_comms(incident_id)
+
+    def list_approval_tasks(self, incident_id: str) -> list[ApprovalTaskSummary]:
+        return self.repository.list_approval_tasks(incident_id)
+
+    def get_approval_task(self, approval_task_id: str) -> ApprovalTaskSummary:
+        return self.repository.get_approval_task(approval_task_id)
 
     def add_fact(
         self,

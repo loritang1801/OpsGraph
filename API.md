@@ -404,6 +404,26 @@ Response:
 
 - `200 OK` with `RecommendationSummary[]`
 
+### 5.7.1 `GET /api/v1/opsgraph/incidents/:incidentId/approval-tasks`
+
+Purpose: list approval tasks currently linked to one incident.
+
+Auth: `viewer`
+
+Response:
+
+- `200 OK` with `ApprovalTaskSummary[]`
+
+### 5.7.2 `GET /api/v1/opsgraph/approval-tasks/:approvalTaskId`
+
+Purpose: fetch one approval task by id.
+
+Auth: `viewer`
+
+Response:
+
+- `200 OK` with `ApprovalTaskSummary`
+
 ### 5.8 `GET /api/v1/opsgraph/incidents/:incidentId/comms`
 
 Purpose: list communication drafts for an incident.

@@ -1,5 +1,6 @@
 from .app import create_app
 from .api_models import (
+    ApprovalTaskSummary,
     AlertIngestCommand,
     AlertIngestResponse,
     CloseIncidentCommand,
@@ -75,6 +76,7 @@ from .sample_payloads import (
 __all__ = [
     "AlertIngestCommand",
     "AlertIngestResponse",
+    "ApprovalTaskSummary",
     "CloseIncidentCommand",
     "CommsDraftSummary",
     "CommsPublishCommand",

@@ -54,6 +54,16 @@ class RecommendationSummary(OpsGraphModel):
     approval_task_id: str | None = None
 
 
+class ApprovalTaskSummary(OpsGraphModel):
+    approval_task_id: str
+    incident_id: str
+    recommendation_id: str | None = None
+    status: str
+    comment: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class CommsDraftSummary(OpsGraphModel):
     draft_id: str
     channel: str

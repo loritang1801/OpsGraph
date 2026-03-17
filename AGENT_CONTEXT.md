@@ -24,6 +24,7 @@
 - `app.py` exposes a FastAPI factory over the shared workflow API
 - Implemented product APIs now include facts, hypothesis decisions, recommendation decisions, severity override, comms publish, resolve/close, postmortem lookup, replay submission, and replay status progression
 - Recommendation approval now bridges through a persisted approval-task row linked to recommendation state
+- Approval tasks can now be listed per incident and fetched directly for operator workbench/read-side integrations
 - Recommendation execution now enforces tighter terminal-state and approval-task conflict rules
 - Comms publish now rejects stale fact-set drafts and requires the bound approved approval task when present
 - Resolve/close transitions now enforce root-cause fact presence and resolved-before-close invariants
@@ -50,7 +51,7 @@
 ## First Implementation Targets
 
 1. Expand replay evaluation from report generation into richer comparison metrics and artifact export coverage
-2. Add recommendation approval execution and comms orchestration beyond current state mutation flow
+2. Add recommendation approval execution and comms orchestration beyond current state mutation flow and approval-task read APIs
 3. Expand failure-path coverage beyond the current replay evaluation domain codes and approval orchestration gaps
 4. Add richer postmortem-to-replay management beyond current replay-case read/list, replay-run filtering, and replay-report filtering coverage
 

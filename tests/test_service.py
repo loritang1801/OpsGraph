@@ -54,6 +54,7 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.addCleanup(service.close)
 
         hypotheses = service.list_hypotheses("incident-1")
+        approval_tasks = service.list_approval_tasks("incident-1")
         published = service.publish_comms("incident-1", "draft-1", comms_publish_command())
         created_fact = service.add_fact("incident-1", fact_create_command())
         retracted_fact = service.retract_fact("incident-1", created_fact.fact_id, fact_retract_command())
@@ -70,6 +71,8 @@ class OpsGraphServiceTests(unittest.TestCase):
         workspace = service.get_incident_workspace("incident-1")
 
         self.assertEqual(len(hypotheses), 1)
+        self.assertEqual(len(approval_tasks), 1)
+        self.assertEqual(approval_tasks[0].approval_task_id, "approval-task-1")
         self.assertEqual(created_fact.status, "confirmed")
         self.assertEqual(retracted_fact.status, "retracted")
         self.assertEqual(hypothesis.status, "accepted")
@@ -81,6 +84,16 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertGreaterEqual(len(replays), 1)
         self.assertEqual(len(workspace.hypotheses), 1)
         self.assertEqual(workspace.recommendations[0].approval_task_id, "approval-task-1")
+
+    def test_get_approval_task_returns_linked_task(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        approval_task = service.get_approval_task("approval-task-1")
+
+        self.assertEqual(approval_task.incident_id, "incident-1")
+        self.assertEqual(approval_task.recommendation_id, "recommendation-1")
+        self.assertEqual(approval_task.status, "pending")
 
     def test_recommendation_execution_requires_approval_and_conflicts_after_terminal(self) -> None:
         service = build_app_service()
