@@ -25,6 +25,7 @@ from .api_models import (
     HypothesisSummary,
     IncidentSummary,
     IncidentWorkspaceResponse,
+    PostmortemFinalizeCommand,
     PostmortemSummary,
     ReplayCaseDetail,
     ReplayCaseSummary,
@@ -118,6 +119,8 @@ class OpsGraphRepository(Protocol):
     def close_incident(self, incident_id: str, command: CloseIncidentCommand) -> IncidentSummary: ...
 
     def get_postmortem(self, incident_id: str) -> PostmortemSummary: ...
+
+    def finalize_postmortem(self, incident_id: str, command: PostmortemFinalizeCommand) -> PostmortemSummary: ...
 
     def list_postmortems(
         self,
@@ -388,6 +391,8 @@ class PostmortemRow(Base):
     fact_set_version: Mapped[int] = mapped_column(Integer)
     artifact_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     replay_case_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    finalized_by_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
 
 
@@ -691,6 +696,8 @@ class SqlAlchemyOpsGraphRepository:
             fact_set_version=row.fact_set_version,
             artifact_id=row.artifact_id,
             replay_case_id=row.replay_case_id,
+            finalized_by_user_id=row.finalized_by_user_id,
+            finalized_at=row.finalized_at,
             updated_at=row.updated_at,
         )
 
@@ -1338,6 +1345,44 @@ class SqlAlchemyOpsGraphRepository:
                 raise KeyError(incident_id)
             return self._to_postmortem(row)
 
+    def finalize_postmortem(self, incident_id: str, command: PostmortemFinalizeCommand) -> PostmortemSummary:
+        with self.session_factory.begin() as session:
+            postmortem_row = session.scalars(
+                select(PostmortemRow).where(PostmortemRow.incident_id == incident_id).limit(1)
+            ).first()
+            if postmortem_row is None:
+                raise KeyError(incident_id)
+            if command.expected_updated_at is not None and not self._timestamps_match(
+                postmortem_row.updated_at,
+                command.expected_updated_at,
+            ):
+                raise ValueError("CONFLICT_STALE_RESOURCE")
+            now = self._utcnow_naive()
+            if postmortem_row.status != "final":
+                postmortem_row.status = "final"
+                postmortem_row.finalized_by_user_id = command.finalized_by_user_id
+                postmortem_row.finalized_at = now
+                postmortem_row.updated_at = now
+                if postmortem_row.artifact_id is not None:
+                    artifact_row = session.get(ArtifactBlobRow, postmortem_row.artifact_id)
+                    if artifact_row is not None:
+                        try:
+                            artifact_payload = json.loads(artifact_row.content_text)
+                        except json.JSONDecodeError:
+                            artifact_payload = {"incident_id": incident_id}
+                        artifact_payload["status"] = "final"
+                        artifact_payload["finalized_by_user_id"] = command.finalized_by_user_id
+                        artifact_payload["finalized_at"] = now.isoformat()
+                        artifact_row.content_text = json.dumps(artifact_payload, sort_keys=True)
+                        artifact_metadata = (
+                            dict(artifact_row.metadata_payload) if isinstance(artifact_row.metadata_payload, dict) else {}
+                        )
+                        artifact_metadata["status"] = "final"
+                        artifact_metadata["finalized_at"] = now.isoformat()
+                        artifact_row.metadata_payload = artifact_metadata
+                        artifact_row.updated_at = now
+            return self._to_postmortem(postmortem_row)
+
     def list_postmortems(
         self,
         workspace_id: str,
@@ -1845,6 +1890,8 @@ class SqlAlchemyOpsGraphRepository:
                     fact_set_version=incident_row.current_fact_set_version,
                     artifact_id=f"artifact-postmortem-{incident_id}",
                     replay_case_id=replay_case_id,
+                    finalized_by_user_id=None,
+                    finalized_at=None,
                     updated_at=now,
                 )
                 session.add(postmortem_row)
@@ -1854,6 +1901,8 @@ class SqlAlchemyOpsGraphRepository:
                 postmortem_row.fact_set_version = incident_row.current_fact_set_version
                 postmortem_row.artifact_id = postmortem_row.artifact_id or f"artifact-postmortem-{incident_id}"
                 postmortem_row.replay_case_id = replay_case_id
+                postmortem_row.finalized_by_user_id = None
+                postmortem_row.finalized_at = None
                 postmortem_row.updated_at = now
             replay_case_row = session.get(ReplayCaseRow, replay_case_id)
             input_snapshot = self._build_incident_execution_seed(session, incident_row)

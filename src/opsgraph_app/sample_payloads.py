@@ -194,6 +194,15 @@ def close_incident_command(
     }
 
 
+def postmortem_finalize_command(
+    *,
+    finalized_by_user_id: str = "incident-commander-demo",
+) -> dict:
+    return {
+        "finalized_by_user_id": finalized_by_user_id,
+    }
+
+
 def replay_run_command(*, incident_id: str = "incident-1", model_bundle_version: str = "opsgraph-v1.2") -> dict:
     return {
         "incident_id": incident_id,

@@ -23,6 +23,7 @@ from opsgraph_app.sample_payloads import (
     fact_retract_command,
     hypothesis_decision_command,
     incident_response_command,
+    postmortem_finalize_command,
     replay_baseline_capture_command,
     replay_evaluation_command,
     replay_case_run_command,
@@ -685,12 +686,45 @@ class OpsGraphServiceTests(unittest.TestCase):
 
         self.assertTrue(any(event.payload.get("postmortem_status") == "draft" for event in matching))
 
+    def test_finalize_postmortem_marks_final_and_emits_update_event(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.resolve_incident("incident-1", resolve_incident_command())
+        service.build_retrospective(retrospective_command(workflow_run_id="opsgraph-event-retro-finalize"))
+        finalized = service.finalize_postmortem(
+            "incident-1",
+            postmortem_finalize_command(finalized_by_user_id="ic-user-1"),
+            idempotency_key="postmortem-finalize-1",
+        )
+        pending = service.runtime_stores.outbox_store.list_pending()
+        matching = [
+            item.event
+            for item in pending
+            if item.event.event_name == "opsgraph.postmortem.updated"
+            and item.event.payload.get("postmortem_id") == finalized.postmortem_id
+        ]
+
+        self.assertEqual(finalized.status, "final")
+        self.assertEqual(finalized.finalized_by_user_id, "ic-user-1")
+        self.assertIsNotNone(finalized.finalized_at)
+        self.assertTrue(any(event.payload.get("postmortem_status") == "final" for event in matching))
+
+        with service.repository.session_factory() as session:
+            artifact_row = session.get(ArtifactBlobRow, finalized.artifact_id)
+            self.assertIsNotNone(artifact_row)
+            payload = json.loads(artifact_row.content_text)
+
+        self.assertEqual(payload["status"], "final")
+        self.assertEqual(payload["finalized_by_user_id"], "ic-user-1")
+
     def test_list_postmortems_supports_workspace_incident_and_status_filters(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
 
         service.resolve_incident("incident-1", resolve_incident_command())
         first = service.build_retrospective(retrospective_command(workflow_run_id="opsgraph-postmortem-list-1"))
+        service.finalize_postmortem("incident-1", postmortem_finalize_command())
         ingest = service.ingest_alert(
             alert_ingest_command(
                 correlation_key="catalog-api:error-spike",
@@ -717,11 +751,13 @@ class OpsGraphServiceTests(unittest.TestCase):
         all_items = service.list_postmortems("ops-ws-1")
         incident_one = service.list_postmortems("ops-ws-1", incident_id="incident-1")
         drafts = service.list_postmortems("ops-ws-1", status="draft")
+        finals = service.list_postmortems("ops-ws-1", status="final")
 
         self.assertEqual(first.current_state, "retrospective_completed")
         self.assertEqual(len(all_items), 2)
         self.assertEqual(incident_one[0].incident_id, "incident-1")
-        self.assertEqual(len(drafts), 2)
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual(len(finals), 1)
 
     def test_list_and_get_replay_cases_from_postmortem_snapshot(self) -> None:
         service = build_app_service()

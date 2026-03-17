@@ -36,6 +36,7 @@
 - Replay runs now execute both incident-backed and replay-case-backed requests through the shared workflow replay path
 - Retrospective completion now persists a replay-case snapshot tied back to the postmortem row and writes a stored postmortem artifact payload
 - Postmortems can now be listed at workspace scope with optional incident/status filters for postmortem-to-replay management views
+- Postmortems can now also be finalized through a product mutation that stamps finalization metadata, updates the stored artifact payload, and emits `opsgraph.postmortem.updated`
 - Replay cases can now be listed and fetched directly from product APIs for postmortem-to-replay navigation
 - Replay run listing can now also be filtered by `replay_case_id` and `status` for postmortem-specific replay tracking
 - Replay evaluation reports can now also be filtered by `replay_case_id` for postmortem-specific comparison views

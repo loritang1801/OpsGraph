@@ -25,6 +25,7 @@ from .api_models import (
     IncidentWorkspaceResponse,
     OpsGraphRunResponse,
     OpsGraphWorkflowStateResponse,
+    PostmortemFinalizeCommand,
     PostmortemSummary,
     ReplayCaseDetail,
     ReplayCaseSummary,
@@ -496,6 +497,51 @@ class OpsGraphAppService:
 
     def get_postmortem(self, incident_id: str) -> PostmortemSummary:
         return self.repository.get_postmortem(incident_id)
+
+    def finalize_postmortem(
+        self,
+        incident_id: str,
+        command: PostmortemFinalizeCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> PostmortemSummary:
+        if isinstance(command, dict):
+            command = PostmortemFinalizeCommand.model_validate(command)
+        request_payload = {"incident_id": incident_id, **command.model_dump(mode="json")}
+        cached = self._load_idempotent_response(
+            operation="opsgraph.finalize_postmortem",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=PostmortemSummary,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.finalize_postmortem(incident_id, command)
+        self._emit_incident_event(
+            incident_id=incident_id,
+            event_name="opsgraph.postmortem.updated",
+            aggregate_type="postmortem",
+            aggregate_id=response.postmortem_id,
+            node_name="postmortem_finalized",
+            payload={
+                "postmortem_id": response.postmortem_id,
+                "postmortem_status": response.status,
+                "finalized_by_user_id": response.finalized_by_user_id,
+                "finalized_at": (
+                    response.finalized_at.isoformat().replace("+00:00", "Z")
+                    if response.finalized_at is not None
+                    else None
+                ),
+                "replay_case_id": response.replay_case_id,
+            },
+        )
+        self._store_idempotent_response(
+            operation="opsgraph.finalize_postmortem",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def list_postmortems(
         self,

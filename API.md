@@ -559,12 +559,41 @@ Response:
     "fact_set_version": 4,
     "artifact_id": null,
     "replay_case_id": "uuid",
+    "finalized_by_user_id": null,
+    "finalized_at": null,
     "updated_at": "2026-03-16T09:40:00Z"
   }
 }
 ```
 
-### 5.12.1 `GET /api/v1/opsgraph/postmortems`
+### 5.12.1 `POST /api/v1/opsgraph/incidents/:incidentId/postmortem/finalize`
+
+Purpose: mark the current postmortem as final and stamp finalization metadata.
+
+Auth: `incident_commander` or stronger
+
+Headers:
+
+- `Idempotency-Key` required
+
+Request body:
+
+```json
+{
+  "finalized_by_user_id": "uuid",
+  "expected_updated_at": "2026-03-16T09:40:00Z"
+}
+```
+
+Response:
+
+- `200 OK` with updated `PostmortemSummary`
+
+Errors:
+
+- `CONFLICT_STALE_RESOURCE`
+
+### 5.12.2 `GET /api/v1/opsgraph/postmortems`
 
 Purpose: list postmortem drafts/finals for one workspace with optional incident and status filters.
 
@@ -880,6 +909,20 @@ Payload:
   "incident_id": "uuid",
   "postmortem_id": "uuid",
   "fact_set_version": 4
+}
+```
+
+#### `opsgraph.postmortem.updated`
+
+Producer: postmortem finalization API
+
+Payload:
+
+```json
+{
+  "incident_id": "uuid",
+  "postmortem_id": "uuid",
+  "postmortem_status": "final"
 }
 ```
 

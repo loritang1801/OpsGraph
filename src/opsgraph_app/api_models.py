@@ -91,6 +91,8 @@ class PostmortemSummary(OpsGraphModel):
     fact_set_version: int
     artifact_id: str | None = None
     replay_case_id: str | None = None
+    finalized_by_user_id: str | None = None
+    finalized_at: datetime | None = None
     updated_at: datetime
 
 
@@ -299,6 +301,11 @@ class ResolveIncidentCommand(OpsGraphModel):
 
 class CloseIncidentCommand(OpsGraphModel):
     close_reason: str
+    expected_updated_at: datetime | None = None
+
+
+class PostmortemFinalizeCommand(OpsGraphModel):
+    finalized_by_user_id: str = "incident-commander-demo"
     expected_updated_at: datetime | None = None
 
 

@@ -54,6 +54,7 @@ from .api_models import (
     RecommendationDecisionResponse,
     OpsGraphRunResponse,
     OpsGraphWorkflowStateResponse,
+    PostmortemFinalizeCommand,
     PostmortemSummary,
     ReplayCaseDetail,
     ReplayCaseSummary,
@@ -621,6 +622,18 @@ def create_fastapi_app(service: OpsGraphAppService):
     ) -> dict[str, object]:
         return success_envelope(
             service.get_postmortem(incident_id),
+            request_id=request_id,
+        )
+
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/postmortem/finalize")
+    def finalize_postmortem(
+        incident_id: str,
+        command: PostmortemFinalizeCommand,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.finalize_postmortem(incident_id, command, idempotency_key=idempotency_key),
             request_id=request_id,
         )
 
