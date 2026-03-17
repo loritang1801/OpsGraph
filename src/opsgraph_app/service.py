@@ -178,6 +178,17 @@ class OpsGraphAppService:
         if cached is not None:
             return cached
         response = self.repository.add_fact(incident_id, command)
+        self._emit_incident_event(
+            incident_id=incident_id,
+            event_name="opsgraph.incident.updated",
+            aggregate_type="incident",
+            aggregate_id=incident_id,
+            node_name="fact_added",
+            payload={
+                "fact_id": response.fact_id,
+                "mutation": "fact_added",
+            },
+        )
         self._store_idempotent_response(
             operation="opsgraph.add_fact",
             idempotency_key=idempotency_key,
@@ -206,6 +217,17 @@ class OpsGraphAppService:
         if cached is not None:
             return cached
         response = self.repository.retract_fact(incident_id, fact_id, command)
+        self._emit_incident_event(
+            incident_id=incident_id,
+            event_name="opsgraph.incident.updated",
+            aggregate_type="incident_fact",
+            aggregate_id=fact_id,
+            node_name="fact_retracted",
+            payload={
+                "fact_id": fact_id,
+                "mutation": "fact_retracted",
+            },
+        )
         self._store_idempotent_response(
             operation="opsgraph.retract_fact",
             idempotency_key=idempotency_key,
@@ -233,6 +255,17 @@ class OpsGraphAppService:
         if cached is not None:
             return cached
         response = self.repository.override_severity(incident_id, command)
+        self._emit_incident_event(
+            incident_id=incident_id,
+            event_name="opsgraph.incident.updated",
+            aggregate_type="incident",
+            aggregate_id=incident_id,
+            node_name="severity_overridden",
+            payload={
+                "mutation": "severity_overridden",
+                "reason": command.reason,
+            },
+        )
         self._store_idempotent_response(
             operation="opsgraph.override_severity",
             idempotency_key=idempotency_key,
@@ -265,6 +298,17 @@ class OpsGraphAppService:
         if cached is not None:
             return cached
         response = self.repository.decide_hypothesis(incident_id, hypothesis_id, command)
+        self._emit_incident_event(
+            incident_id=incident_id,
+            event_name="opsgraph.hypothesis.updated",
+            aggregate_type="hypothesis",
+            aggregate_id=hypothesis_id,
+            node_name="hypothesis_decided",
+            payload={
+                "hypothesis_id": hypothesis_id,
+                "hypothesis_status": response.status,
+            },
+        )
         self._store_idempotent_response(
             operation="opsgraph.decide_hypothesis",
             idempotency_key=idempotency_key,
@@ -297,6 +341,17 @@ class OpsGraphAppService:
         if cached is not None:
             return cached
         response = self.repository.decide_recommendation(incident_id, recommendation_id, command)
+        self._emit_incident_event(
+            incident_id=incident_id,
+            event_name="opsgraph.incident.updated",
+            aggregate_type="runbook_recommendation",
+            aggregate_id=recommendation_id,
+            node_name="recommendation_decided",
+            payload={
+                "recommendation_id": recommendation_id,
+                "recommendation_status": response.status,
+            },
+        )
         self._store_idempotent_response(
             operation="opsgraph.decide_recommendation",
             idempotency_key=idempotency_key,
@@ -325,6 +380,18 @@ class OpsGraphAppService:
         if cached is not None:
             return cached
         response = self.repository.publish_comms(incident_id, draft_id, command)
+        self._emit_incident_event(
+            incident_id=incident_id,
+            event_name="opsgraph.comms.updated",
+            aggregate_type="comms_draft",
+            aggregate_id=draft_id,
+            node_name="comms_published",
+            payload={
+                "draft_id": draft_id,
+                "comms_status": response.status,
+                "published_message_ref": response.published_message_ref,
+            },
+        )
         self._store_idempotent_response(
             operation="opsgraph.publish_comms",
             idempotency_key=idempotency_key,
@@ -352,6 +419,17 @@ class OpsGraphAppService:
         if cached is not None:
             return cached
         response = self.repository.resolve_incident(incident_id, command)
+        self._emit_incident_event(
+            incident_id=incident_id,
+            event_name="opsgraph.incident.updated",
+            aggregate_type="incident",
+            aggregate_id=incident_id,
+            node_name="incident_resolved",
+            payload={
+                "mutation": "incident_resolved",
+                "resolution_summary": command.resolution_summary,
+            },
+        )
         self._store_idempotent_response(
             operation="opsgraph.resolve_incident",
             idempotency_key=idempotency_key,
@@ -379,6 +457,17 @@ class OpsGraphAppService:
         if cached is not None:
             return cached
         response = self.repository.close_incident(incident_id, command)
+        self._emit_incident_event(
+            incident_id=incident_id,
+            event_name="opsgraph.incident.updated",
+            aggregate_type="incident",
+            aggregate_id=incident_id,
+            node_name="incident_closed",
+            payload={
+                "mutation": "incident_closed",
+                "close_reason": command.close_reason,
+            },
+        )
         self._store_idempotent_response(
             operation="opsgraph.close_incident",
             idempotency_key=idempotency_key,
@@ -850,4 +939,34 @@ class OpsGraphAppService:
                 payload=payload,
                 emitted_at=datetime.now(UTC),
             )
+        )
+
+    def _emit_incident_event(
+        self,
+        *,
+        incident_id: str,
+        event_name: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        node_name: str,
+        workflow_run_id: str | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        context = self.repository.get_incident_event_context(incident_id)
+        merged_payload = {
+            "incident_id": incident_id,
+            "workspace_id": context["workspace_id"],
+            "incident_key": context["incident_key"],
+            "severity": context["severity"],
+            "status": context["status"],
+            "current_fact_set_version": context["current_fact_set_version"],
+            **(payload or {}),
+        }
+        self._emit_product_event(
+            event_name=event_name,
+            workflow_run_id=workflow_run_id or str(context.get("latest_workflow_run_id") or f"opsgraph-{incident_id}"),
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            node_name=node_name,
+            payload=merged_payload,
         )

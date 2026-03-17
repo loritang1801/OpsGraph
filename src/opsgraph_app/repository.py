@@ -74,6 +74,8 @@ class OpsGraphRepository(Protocol):
 
     def get_approval_task(self, approval_task_id: str) -> ApprovalTaskSummary: ...
 
+    def get_incident_event_context(self, incident_id: str) -> dict[str, object]: ...
+
     def ingest_alert(
         self,
         *,
@@ -905,6 +907,21 @@ class SqlAlchemyOpsGraphRepository:
             if row is None:
                 raise KeyError(approval_task_id)
             return self._to_approval_task(row)
+
+    def get_incident_event_context(self, incident_id: str) -> dict[str, object]:
+        with self.session_factory() as session:
+            row = session.get(IncidentRow, incident_id)
+            if row is None:
+                raise KeyError(incident_id)
+            return {
+                "incident_id": row.incident_id,
+                "workspace_id": row.ops_workspace_id,
+                "incident_key": row.incident_key,
+                "severity": row.severity,
+                "status": row.incident_status,
+                "current_fact_set_version": row.current_fact_set_version,
+                "latest_workflow_run_id": row.latest_workflow_run_id,
+            }
 
     def ingest_alert(
         self,

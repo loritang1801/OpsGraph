@@ -263,6 +263,37 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(workspace.approval_tasks[0].approval_task_id, "approval-task-1")
         self.assertEqual(workspace.recommendations[0].approval_task_id, "approval-task-1")
 
+    def test_add_fact_emits_incident_updated_outbox_event(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        created_fact = service.add_fact("incident-1", fact_create_command())
+        pending = service.runtime_stores.outbox_store.list_pending()
+        matching = [
+            item.event
+            for item in pending
+            if item.event.event_name == "opsgraph.incident.updated"
+            and item.event.payload.get("fact_id") == created_fact.fact_id
+        ]
+
+        self.assertTrue(any(event.payload.get("mutation") == "fact_added" for event in matching))
+
+    def test_publish_comms_emits_comms_updated_outbox_event(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        published = service.publish_comms("incident-1", "draft-1", comms_publish_command())
+        pending = service.runtime_stores.outbox_store.list_pending()
+        matching = [
+            item.event
+            for item in pending
+            if item.event.event_name == "opsgraph.comms.updated"
+            and item.event.payload.get("draft_id") == "draft-1"
+        ]
+
+        self.assertEqual(published.status, "published")
+        self.assertTrue(any(event.payload.get("comms_status") == "published" for event in matching))
+
     def test_incident_execution_seed_uses_persisted_signals(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
