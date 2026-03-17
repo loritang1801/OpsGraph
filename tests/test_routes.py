@@ -31,6 +31,24 @@ class OpsGraphRouteErrorMappingTests(unittest.TestCase):
         self.assertEqual(status_code, 422)
         self.assertEqual(payload["error"]["code"], "ROOT_CAUSE_FACT_REQUIRED")
 
+    def test_maps_replay_not_executed_to_409(self) -> None:
+        status_code, payload = map_domain_error(
+            ValueError("REPLAY_RUN_NOT_EXECUTED"),
+            path="/api/v1/opsgraph/replays/replay-1/evaluate",
+        )
+
+        self.assertEqual(status_code, 409)
+        self.assertEqual(payload["error"]["code"], "REPLAY_RUN_NOT_EXECUTED")
+
+    def test_maps_replay_evaluation_unavailable_to_503(self) -> None:
+        status_code, payload = map_domain_error(
+            ValueError("REPLAY_EVALUATION_UNAVAILABLE"),
+            path="/api/v1/opsgraph/replays/replay-1/evaluate",
+        )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "REPLAY_EVALUATION_UNAVAILABLE")
+
 
 if __name__ == "__main__":
     unittest.main()

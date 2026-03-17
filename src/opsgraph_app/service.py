@@ -327,11 +327,11 @@ class OpsGraphAppService:
         if isinstance(command, dict):
             command = ReplayEvaluationCommand.model_validate(command)
         if self.runtime_stores is None:
-            raise ValueError("Replay evaluation requires runtime stores")
+            raise ValueError("REPLAY_EVALUATION_UNAVAILABLE")
         replay = self.repository.get_replay_run(replay_run_id)
         baseline = self.repository.get_replay_baseline(command.baseline_id)
         if replay.workflow_run_id is None:
-            raise ValueError("Replay run has not executed yet")
+            raise ValueError("REPLAY_RUN_NOT_EXECUTED")
         replay_state = self.get_workflow_state(replay.workflow_run_id)
         replay_records = self.runtime_stores.replay_store.list_for_run(replay.workflow_run_id)
         replay_nodes = [

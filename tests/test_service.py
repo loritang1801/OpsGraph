@@ -250,6 +250,19 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertTrue(any(item.baseline_id == baseline.baseline_id for item in baselines))
         self.assertTrue(any(item.report_id == report.report_id for item in reports))
 
+    def test_evaluate_replay_requires_executed_run(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        baseline = service.capture_replay_baseline(replay_baseline_capture_command())
+        replay = service.start_replay_run(replay_run_command())
+
+        with self.assertRaisesRegex(ValueError, "REPLAY_RUN_NOT_EXECUTED"):
+            service.evaluate_replay_run(
+                replay.replay_run_id,
+                replay_evaluation_command(baseline_id=baseline.baseline_id),
+            )
+
     def test_respond_to_incident_and_load_state(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
