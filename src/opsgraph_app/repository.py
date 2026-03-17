@@ -694,6 +694,18 @@ class SqlAlchemyOpsGraphRepository:
         )
 
     @staticmethod
+    def _validate_replay_status_transition(current_status: str, next_status: str) -> bool:
+        if current_status == next_status:
+            return False
+        allowed_transitions = {
+            "queued": {"running", "completed", "failed"},
+            "running": {"completed", "failed"},
+            "completed": set(),
+            "failed": set(),
+        }
+        return next_status in allowed_transitions.get(current_status, set())
+
+    @staticmethod
     def _to_replay_case_summary(row: ReplayCaseRow) -> ReplayCaseSummary:
         return ReplayCaseSummary(
             replay_case_id=row.replay_case_id,
@@ -1583,6 +1595,10 @@ class SqlAlchemyOpsGraphRepository:
             replay_row = session.get(ReplayRunRow, replay_run_id)
             if replay_row is None:
                 raise KeyError(replay_run_id)
+            if not self._validate_replay_status_transition(replay_row.status, command.status):
+                if replay_row.status == command.status:
+                    return self._to_replay(replay_row)
+                raise ValueError("REPLAY_STATUS_CONFLICT")
             replay_row.status = command.status
             incident_row = session.get(IncidentRow, replay_row.incident_id)
             if incident_row is not None:
@@ -1611,6 +1627,10 @@ class SqlAlchemyOpsGraphRepository:
             replay_row = session.get(ReplayRunRow, replay_run_id)
             if replay_row is None:
                 raise KeyError(replay_run_id)
+            if not self._validate_replay_status_transition(replay_row.status, status):
+                if replay_row.status == status:
+                    return self._to_replay(replay_row)
+                raise ValueError("REPLAY_STATUS_CONFLICT")
             replay_row.status = status
             replay_row.workflow_run_id = workflow_run_id
             replay_row.current_state = current_state

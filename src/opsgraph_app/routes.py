@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import importlib
+import json
+from datetime import UTC, datetime
 from typing import Any
 
 ERROR_STATUS_BY_CODE = {
@@ -17,6 +20,7 @@ ERROR_STATUS_BY_CODE = {
     "INCIDENT_ALREADY_RESOLVED": 409,
     "INCIDENT_NOT_RESOLVED": 409,
     "REPLAY_RUN_NOT_EXECUTED": 409,
+    "REPLAY_STATUS_CONFLICT": 409,
     "ROOT_CAUSE_FACT_REQUIRED": 422,
     "REPLAY_EVALUATION_UNAVAILABLE": 503,
     "INVALID_CURSOR": 400,
@@ -131,11 +135,120 @@ def paginate_collection(items: list[Any], *, cursor: str | None = None, limit: i
     return page, (_encode_cursor(next_offset) if has_more else None), has_more
 
 
+def _event_topic(event_name: str) -> str:
+    if event_name.startswith("workflow."):
+        return "workflow"
+    if event_name.startswith("approval."):
+        return "approval"
+    if event_name.startswith("artifact."):
+        return "artifact"
+    if event_name.startswith("opsgraph."):
+        return "opsgraph"
+    return "workspace"
+
+
+def _isoformat_utc(value: datetime) -> str:
+    timestamp = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _payload_lookup(payload: dict[str, object], *keys: str) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _event_topics(context: dict[str, object]) -> set[str]:
+    payload = context.get("payload")
+    normalized_payload = payload if isinstance(payload, dict) else {}
+    topics = {str(context["topic"]), f"opsgraph.workspace.{context['workspace_id']}"}
+
+    incident_id = _payload_lookup(normalized_payload, "incident_id")
+    if incident_id is None and str(context["subject_type"]) == "incident":
+        incident_id = str(context["subject_id"])
+    if incident_id is not None:
+        topics.add(f"opsgraph.incident.{incident_id}")
+
+    return topics
+
+
+def _matches_event_topic(context: dict[str, object], requested_topic: str | None) -> bool:
+    if requested_topic is None:
+        return True
+    return requested_topic in _event_topics(context)
+
+
+def _normalize_resume_after_id(pending_events: list[Any], resume_after_id: str | None) -> str | None:
+    if resume_after_id is None:
+        return None
+    for stored in pending_events:
+        if stored.event.event_id == resume_after_id:
+            return resume_after_id
+    return None
+
+
+def _format_sse_message(*, event_id: str, event_name: str, payload: dict[str, object]) -> str:
+    return f"id: {event_id}\nevent: {event_name}\ndata: {json.dumps(payload, sort_keys=True)}\n\n"
+
+
+def _resolve_outbox_event_context(service: OpsGraphAppService, event) -> dict[str, object] | None:
+    payload = dict(getattr(event, "payload", {}) or {})
+    state: dict[str, object] = {}
+    runtime_stores = getattr(service, "runtime_stores", None)
+    if runtime_stores is not None and hasattr(runtime_stores, "state_store"):
+        try:
+            state_record = runtime_stores.state_store.load(event.workflow_run_id)
+        except Exception:  # noqa: BLE001
+            state = {}
+        else:
+            state = dict(getattr(state_record, "state", {}) or {})
+    workspace_id = (
+        state.get("workspace_id")
+        or state.get("ops_workspace_id")
+        or state.get("workspace")
+        or payload.get("workspace_id")
+        or payload.get("ops_workspace_id")
+        or payload.get("workspace")
+    )
+    if workspace_id is None:
+        return None
+    subject_type = (
+        state.get("subject_type")
+        or payload.get("subject_type")
+        or ("incident" if payload.get("incident_id") is not None else None)
+        or event.aggregate_type
+    )
+    subject_id = (
+        state.get("subject_id")
+        or payload.get("subject_id")
+        or payload.get("incident_id")
+        or payload.get("replay_case_id")
+        or event.aggregate_id
+    )
+    return {
+        "event_id": event.event_id,
+        "event_type": event.event_name,
+        "organization_id": str(
+            state.get("organization_id")
+            or payload.get("organization_id")
+            or "unknown-org"
+        ),
+        "workspace_id": str(workspace_id),
+        "subject_type": str(subject_type),
+        "subject_id": str(subject_id),
+        "occurred_at": _isoformat_utc(event.emitted_at),
+        "payload": payload,
+        "topic": _event_topic(event.event_name),
+    }
+
+
 def create_fastapi_app(service: OpsGraphAppService):
     ap = load_shared_agent_platform()
     try:
         from fastapi import FastAPI, Header, Request
-        from fastapi.responses import JSONResponse
+        from fastapi.responses import JSONResponse, StreamingResponse
     except ImportError as exc:
         errors_module = importlib.import_module(f"{ap.__name__}.errors")
         FastAPIUnavailableError = errors_module.FastAPIUnavailableError
@@ -154,17 +267,94 @@ def create_fastapi_app(service: OpsGraphAppService):
         status_code, payload = map_domain_error(exc, path=str(request.url.path))
         return JSONResponse(status_code=status_code, content=payload)
 
-    @app.get("/health", response_model=HealthResponse)
-    def health() -> HealthResponse:
-        return HealthResponse(status="ok", product="opsgraph")
+    @app.get("/health")
+    def health(
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            HealthResponse(status="ok", product="opsgraph"),
+            request_id=request_id,
+        )
 
     @app.get("/api/v1/workflows")
-    def list_workflows():
-        return service.list_workflows()
+    def list_workflows(
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.list_workflows(),
+            request_id=request_id,
+        )
 
-    @app.get("/api/v1/workflows/{workflow_run_id}", response_model=OpsGraphWorkflowStateResponse)
-    def get_workflow_state(workflow_run_id: str) -> OpsGraphWorkflowStateResponse:
-        return service.get_workflow_state(workflow_run_id)
+    @app.get("/api/v1/workflows/{workflow_run_id}")
+    def get_workflow_state(
+        workflow_run_id: str,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.get_workflow_state(workflow_run_id),
+            request_id=request_id,
+        )
+
+    @app.get("/api/v1/events/stream")
+    async def stream_events(
+        workspace_id: str,
+        topic: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    ):
+        runtime_stores = getattr(service, "runtime_stores", None)
+        outbox_store = getattr(runtime_stores, "outbox_store", None)
+
+        async def event_stream():
+            seen_event_ids: set[str] = set()
+            resume_after_id = last_event_id
+            while True:
+                emitted_any = False
+                pending = outbox_store.list_pending() if outbox_store is not None else []
+                resume_after_id = _normalize_resume_after_id(pending, resume_after_id)
+                resume_matched = resume_after_id is None
+                for stored in pending:
+                    event = stored.event
+                    if event.event_id in seen_event_ids:
+                        continue
+                    if not resume_matched:
+                        if event.event_id == resume_after_id:
+                            resume_matched = True
+                        continue
+                    context = _resolve_outbox_event_context(service, event)
+                    if context is None:
+                        continue
+                    if str(context["workspace_id"]) != workspace_id:
+                        continue
+                    if not _matches_event_topic(context, topic):
+                        continue
+                    if subject_type is not None and str(context["subject_type"]) != subject_type:
+                        continue
+                    if subject_id is not None and str(context["subject_id"]) != subject_id:
+                        continue
+                    seen_event_ids.add(event.event_id)
+                    emitted_any = True
+                    yield _format_sse_message(
+                        event_id=event.event_id,
+                        event_name=event.event_name,
+                        payload={key: value for key, value in context.items() if key != "topic"},
+                    )
+                resume_after_id = None
+                if not emitted_any:
+                    heartbeat_at = datetime.now(UTC)
+                    heartbeat = {
+                        "workspace_id": workspace_id,
+                        "occurred_at": _isoformat_utc(heartbeat_at),
+                    }
+                    yield _format_sse_message(
+                        event_id=f"heartbeat-{int(heartbeat_at.timestamp() * 1000)}",
+                        event_name="heartbeat",
+                        payload=heartbeat,
+                    )
+                await asyncio.sleep(15)
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.post("/api/v1/opsgraph/alerts/prometheus", status_code=202)
     def ingest_prometheus_alert(
@@ -291,10 +481,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             request_id=request_id,
         )
 
-    @app.post(
-        "/api/v1/opsgraph/incidents/{incident_id}/hypotheses/{hypothesis_id}/decision",
-        response_model=HypothesisDecisionResponse,
-    )
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/hypotheses/{hypothesis_id}/decision")
     def decide_hypothesis(
         incident_id: str,
         hypothesis_id: str,
@@ -354,16 +541,23 @@ def create_fastapi_app(service: OpsGraphAppService):
             request_id=request_id,
         )
 
-    @app.post(
-        "/api/v1/opsgraph/incidents/{incident_id}/recommendations/{recommendation_id}/decision",
-        response_model=RecommendationDecisionResponse,
-    )
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/recommendations/{recommendation_id}/decision")
     def decide_recommendation(
         incident_id: str,
         recommendation_id: str,
         command: RecommendationDecisionCommand,
-    ) -> RecommendationDecisionResponse:
-        return service.decide_recommendation(incident_id, recommendation_id, command)
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.decide_recommendation(
+                incident_id,
+                recommendation_id,
+                command,
+                idempotency_key=idempotency_key,
+            ),
+            request_id=request_id,
+        )
 
     @app.get("/api/v1/opsgraph/incidents/{incident_id}/comms")
     def list_comms(
@@ -457,13 +651,25 @@ def create_fastapi_app(service: OpsGraphAppService):
             request_id=request_id,
         )
 
-    @app.post("/api/v1/opsgraph/incidents/respond", response_model=OpsGraphRunResponse)
-    def respond_to_incident(command: IncidentResponseCommand) -> OpsGraphRunResponse:
-        return service.respond_to_incident(command)
+    @app.post("/api/v1/opsgraph/incidents/respond")
+    def respond_to_incident(
+        command: IncidentResponseCommand,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.respond_to_incident(command),
+            request_id=request_id,
+        )
 
-    @app.post("/api/v1/opsgraph/incidents/retrospective", response_model=OpsGraphRunResponse)
-    def build_retrospective(command: RetrospectiveCommand) -> OpsGraphRunResponse:
-        return service.build_retrospective(command)
+    @app.post("/api/v1/opsgraph/incidents/retrospective")
+    def build_retrospective(
+        command: RetrospectiveCommand,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.build_retrospective(command),
+            request_id=request_id,
+        )
 
     @app.post("/api/v1/opsgraph/replays/run", status_code=202)
     def start_replay_run(
@@ -514,24 +720,47 @@ def create_fastapi_app(service: OpsGraphAppService):
             has_more=has_more,
         )
 
-    @app.post("/api/v1/opsgraph/replays/baselines/capture", response_model=ReplayBaselineSummary)
-    def capture_replay_baseline(command: ReplayBaselineCaptureCommand) -> ReplayBaselineSummary:
-        return service.capture_replay_baseline(command)
+    @app.post("/api/v1/opsgraph/replays/baselines/capture")
+    def capture_replay_baseline(
+        command: ReplayBaselineCaptureCommand,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.capture_replay_baseline(command),
+            request_id=request_id,
+        )
 
-    @app.post("/api/v1/opsgraph/replays/{replay_run_id}/status", response_model=ReplayRunSummary)
-    def update_replay_status(replay_run_id: str, command: ReplayStatusCommand) -> ReplayRunSummary:
-        return service.update_replay_status(replay_run_id, command)
+    @app.post("/api/v1/opsgraph/replays/{replay_run_id}/status")
+    def update_replay_status(
+        replay_run_id: str,
+        command: ReplayStatusCommand,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.update_replay_status(replay_run_id, command),
+            request_id=request_id,
+        )
 
-    @app.post("/api/v1/opsgraph/replays/{replay_run_id}/execute", response_model=ReplayRunSummary)
-    def execute_replay_run(replay_run_id: str) -> ReplayRunSummary:
-        return service.execute_replay_run(replay_run_id)
+    @app.post("/api/v1/opsgraph/replays/{replay_run_id}/execute")
+    def execute_replay_run(
+        replay_run_id: str,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.execute_replay_run(replay_run_id),
+            request_id=request_id,
+        )
 
-    @app.post("/api/v1/opsgraph/replays/{replay_run_id}/evaluate", response_model=ReplayEvaluationSummary)
+    @app.post("/api/v1/opsgraph/replays/{replay_run_id}/evaluate")
     def evaluate_replay_run(
         replay_run_id: str,
         command: ReplayEvaluationCommand,
-    ) -> ReplayEvaluationSummary:
-        return service.evaluate_replay_run(replay_run_id, command)
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.evaluate_replay_run(replay_run_id, command),
+            request_id=request_id,
+        )
 
     @app.get("/api/v1/opsgraph/replays/reports")
     def list_replay_reports(

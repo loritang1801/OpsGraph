@@ -275,10 +275,32 @@ class OpsGraphAppService:
         incident_id: str,
         recommendation_id: str,
         command: RecommendationDecisionCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
     ) -> RecommendationDecisionResponse:
         if isinstance(command, dict):
             command = RecommendationDecisionCommand.model_validate(command)
-        return self.repository.decide_recommendation(incident_id, recommendation_id, command)
+        request_payload = {
+            "incident_id": incident_id,
+            "recommendation_id": recommendation_id,
+            **command.model_dump(mode="json"),
+        }
+        cached = self._load_idempotent_response(
+            operation="opsgraph.decide_recommendation",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=RecommendationDecisionResponse,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.decide_recommendation(incident_id, recommendation_id, command)
+        self._store_idempotent_response(
+            operation="opsgraph.decide_recommendation",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def publish_comms(
         self,

@@ -186,6 +186,26 @@ class OpsGraphServiceTests(unittest.TestCase):
                 idempotency_key="replay-run-conflict",
             )
 
+    def test_decide_recommendation_is_idempotent_for_repeated_key(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        first = service.decide_recommendation(
+            "incident-1",
+            "recommendation-1",
+            recommendation_decision_command(),
+            idempotency_key="recommendation-decision-1",
+        )
+        second = service.decide_recommendation(
+            "incident-1",
+            "recommendation-1",
+            recommendation_decision_command(),
+            idempotency_key="recommendation-decision-1",
+        )
+
+        self.assertEqual(first.recommendation_id, second.recommendation_id)
+        self.assertEqual(first.status, second.status)
+
     def test_fact_hypothesis_recommendation_comms_and_replay_mutations(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
@@ -588,6 +608,19 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertTrue(any(item.replay_run_id == queued.replay_run_id for item in queued_runs))
         self.assertFalse(any(item.replay_run_id == queued.replay_run_id for item in completed_runs))
         self.assertTrue(any(item.replay_run_id == completed.replay_run_id for item in completed_runs))
+
+    def test_replay_status_rejects_transition_from_terminal_state(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        replay = service.start_replay_run(replay_run_command(model_bundle_version="opsgraph-v1.5"))
+        service.update_replay_status(replay.replay_run_id, replay_status_command())
+
+        with self.assertRaisesRegex(ValueError, "REPLAY_STATUS_CONFLICT"):
+            service.update_replay_status(
+                replay.replay_run_id,
+                replay_status_command(status="running"),
+            )
 
     def test_list_replay_reports_can_filter_by_replay_case_id(self) -> None:
         service = build_app_service()

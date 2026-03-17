@@ -882,6 +882,7 @@ Payload:
 | `INCIDENT_NOT_RESOLVED` | `409` | Close requested before resolve |
 | `ROOT_CAUSE_FACT_REQUIRED` | `422` | Resolve requires at least one root cause fact |
 | `REPLAY_RUN_NOT_EXECUTED` | `409` | Replay evaluation requested before execution completed |
+| `REPLAY_STATUS_CONFLICT` | `409` | Replay status transition is invalid for the current run state |
 | `REPLAY_EVALUATION_UNAVAILABLE` | `503` | Replay evaluation runtime dependencies unavailable |
 
 ## 9. Authorization Matrix
