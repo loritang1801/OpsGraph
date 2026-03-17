@@ -55,6 +55,7 @@ class OpsGraphServiceTests(unittest.TestCase):
 
         hypotheses = service.list_hypotheses("incident-1")
         approval_tasks = service.list_approval_tasks("incident-1")
+        comms = service.list_comms("incident-1")
         published = service.publish_comms("incident-1", "draft-1", comms_publish_command())
         created_fact = service.add_fact("incident-1", fact_create_command())
         retracted_fact = service.retract_fact("incident-1", created_fact.fact_id, fact_retract_command())
@@ -73,6 +74,7 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(len(hypotheses), 1)
         self.assertEqual(len(approval_tasks), 1)
         self.assertEqual(approval_tasks[0].approval_task_id, "approval-task-1")
+        self.assertEqual(comms[0].created_at.isoformat(), "2026-03-16T09:00:00")
         self.assertEqual(created_fact.status, "confirmed")
         self.assertEqual(retracted_fact.status, "retracted")
         self.assertEqual(hypothesis.status, "accepted")
@@ -94,6 +96,20 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(approval_task.incident_id, "incident-1")
         self.assertEqual(approval_task.recommendation_id, "recommendation-1")
         self.assertEqual(approval_task.status, "pending")
+
+    def test_list_comms_supports_channel_and_status_filters(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        by_channel = service.list_comms("incident-1", channel="internal_slack")
+        by_status = service.list_comms("incident-1", status="draft")
+        missing = service.list_comms("incident-1", channel="email")
+
+        self.assertEqual(len(by_channel), 1)
+        self.assertEqual(by_channel[0].draft_id, "draft-1")
+        self.assertEqual(by_channel[0].approval_task_id, None)
+        self.assertEqual(len(by_status), 1)
+        self.assertEqual(missing, [])
 
     def test_recommendation_execution_requires_approval_and_conflicts_after_terminal(self) -> None:
         service = build_app_service()

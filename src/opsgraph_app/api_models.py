@@ -70,7 +70,9 @@ class CommsDraftSummary(OpsGraphModel):
     title: str
     status: str
     fact_set_version: int
+    approval_task_id: str | None = None
     published_message_ref: str | None = None
+    created_at: datetime
 
 
 class TimelineEventSummary(OpsGraphModel):

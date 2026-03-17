@@ -169,8 +169,12 @@ def create_fastapi_app(service: OpsGraphAppService):
         return service.decide_recommendation(incident_id, recommendation_id, command)
 
     @app.get("/api/v1/opsgraph/incidents/{incident_id}/comms")
-    def list_comms(incident_id: str) -> list[CommsDraftSummary]:
-        return service.list_comms(incident_id)
+    def list_comms(
+        incident_id: str,
+        channel: str | None = None,
+        status: str | None = None,
+    ) -> list[CommsDraftSummary]:
+        return service.list_comms(incident_id, channel=channel, status=status)
 
     @app.post("/api/v1/opsgraph/incidents/{incident_id}/comms/{draft_id}/publish", response_model=CommsPublishResponse)
     def publish_comms(

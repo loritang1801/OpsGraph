@@ -53,7 +53,13 @@ class OpsGraphRepository(Protocol):
 
     def list_recommendations(self, incident_id: str) -> list[RecommendationSummary]: ...
 
-    def list_comms(self, incident_id: str) -> list[CommsDraftSummary]: ...
+    def list_comms(
+        self,
+        incident_id: str,
+        *,
+        channel: str | None = None,
+        status: str | None = None,
+    ) -> list[CommsDraftSummary]: ...
 
     def list_approval_tasks(self, incident_id: str) -> list[ApprovalTaskSummary]: ...
 
@@ -548,7 +554,9 @@ class SqlAlchemyOpsGraphRepository:
             title=row.title,
             status=row.status,
             fact_set_version=row.fact_set_version,
+            approval_task_id=row.approval_task_id,
             published_message_ref=row.published_message_ref,
+            created_at=row.created_at,
         )
 
     @staticmethod
@@ -738,13 +746,20 @@ class SqlAlchemyOpsGraphRepository:
             ).all()
             return [self._to_recommendation(row) for row in rows]
 
-    def list_comms(self, incident_id: str) -> list[CommsDraftSummary]:
+    def list_comms(
+        self,
+        incident_id: str,
+        *,
+        channel: str | None = None,
+        status: str | None = None,
+    ) -> list[CommsDraftSummary]:
         with self.session_factory() as session:
-            rows = session.scalars(
-                select(CommsDraftRow)
-                .where(CommsDraftRow.incident_id == incident_id)
-                .order_by(CommsDraftRow.draft_id.asc())
-            ).all()
+            stmt = select(CommsDraftRow).where(CommsDraftRow.incident_id == incident_id)
+            if channel is not None:
+                stmt = stmt.where(CommsDraftRow.channel == channel)
+            if status is not None:
+                stmt = stmt.where(CommsDraftRow.status == status)
+            rows = session.scalars(stmt.order_by(CommsDraftRow.draft_id.asc())).all()
             return [self._to_comms(row) for row in rows]
 
     def list_approval_tasks(self, incident_id: str) -> list[ApprovalTaskSummary]:

@@ -93,8 +93,14 @@ class OpsGraphAppService:
     def list_recommendations(self, incident_id: str) -> list[RecommendationSummary]:
         return self.repository.list_recommendations(incident_id)
 
-    def list_comms(self, incident_id: str) -> list[CommsDraftSummary]:
-        return self.repository.list_comms(incident_id)
+    def list_comms(
+        self,
+        incident_id: str,
+        *,
+        channel: str | None = None,
+        status: str | None = None,
+    ) -> list[CommsDraftSummary]:
+        return self.repository.list_comms(incident_id, channel=channel, status=status)
 
     def list_approval_tasks(self, incident_id: str) -> list[ApprovalTaskSummary]:
         return self.repository.list_approval_tasks(incident_id)

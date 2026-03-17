@@ -432,7 +432,7 @@ Auth: `viewer`
 
 Query params:
 
-- `channel_type`
+- `channel`
 - `status`
 
 Response:
