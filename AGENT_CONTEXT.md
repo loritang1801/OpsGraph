@@ -29,6 +29,7 @@
 - Resolve/close transitions now enforce root-cause fact presence and resolved-before-close invariants
 - Replay runs now execute both incident-backed and replay-case-backed requests through the shared workflow replay path
 - Retrospective completion now persists a replay-case snapshot tied back to the postmortem row
+- Replay cases can now be listed and fetched directly from product APIs for postmortem-to-replay navigation
 - `routes.py` now contains explicit domain-error-to-HTTP mapping logic for product APIs
 - Replay runs can now seed file-backed replay fixtures under `replay_fixtures/`, execute the shared `opsgraph_incident_response` workflow through `ReplayFixtureLoader`, and persist workflow run linkage/current state back to the replay row
 - Replay baseline capture and evaluation reporting are now implemented end-to-end, with baseline/replay report persistence, node-level diffs, latency deltas, and JSON/Markdown artifacts under `replay_reports/`
@@ -48,7 +49,7 @@
 1. Expand replay evaluation from report generation into richer comparison metrics and artifact export coverage
 2. Add recommendation approval execution and comms orchestration beyond current state mutation flow
 3. Add broader failure-path coverage for replay execution and approval orchestration
-4. Add replay-case listing/read APIs and richer postmortem-to-replay management
+4. Add richer postmortem-to-replay management beyond current replay-case read/list coverage
 
 ## Local Note
 

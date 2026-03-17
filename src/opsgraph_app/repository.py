@@ -23,6 +23,8 @@ from .api_models import (
     IncidentSummary,
     IncidentWorkspaceResponse,
     PostmortemSummary,
+    ReplayCaseDetail,
+    ReplayCaseSummary,
     ReplayBaselineSummary,
     ReplayEvaluationSummary,
     ReplayNodeDiffSummary,
@@ -97,6 +99,10 @@ class OpsGraphRepository(Protocol):
     def start_replay_run(self, command: ReplayRunCommand) -> ReplayRunSummary: ...
 
     def list_replays(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayRunSummary]: ...
+
+    def list_replay_cases(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayCaseSummary]: ...
+
+    def get_replay_case(self, replay_case_id: str) -> ReplayCaseDetail: ...
 
     def update_replay_status(self, replay_run_id: str, command: ReplayStatusCommand) -> ReplayRunSummary: ...
 
@@ -550,6 +556,7 @@ class SqlAlchemyOpsGraphRepository:
             status=row.status,
             fact_set_version=row.fact_set_version,
             artifact_id=row.artifact_id,
+            replay_case_id=row.replay_case_id,
             updated_at=row.updated_at,
         )
 
@@ -565,6 +572,33 @@ class SqlAlchemyOpsGraphRepository:
             current_state=row.current_state,
             error_message=row.error_message,
             created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_replay_case_summary(row: ReplayCaseRow) -> ReplayCaseSummary:
+        return ReplayCaseSummary(
+            replay_case_id=row.replay_case_id,
+            incident_id=row.incident_id,
+            workflow_type=row.workflow_type,
+            subject_type=row.subject_type,
+            subject_id=row.subject_id,
+            case_name=row.case_name,
+            source_workflow_run_id=row.source_workflow_run_id,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    @classmethod
+    def _to_replay_case_detail(cls, row: ReplayCaseRow) -> ReplayCaseDetail:
+        summary = cls._to_replay_case_summary(row)
+        return ReplayCaseDetail(
+            **summary.model_dump(),
+            input_snapshot=dict(row.input_snapshot_payload),
+            expected_output=(
+                dict(row.expected_output_payload)
+                if isinstance(row.expected_output_payload, dict)
+                else row.expected_output_payload
+            ),
         )
 
     @staticmethod
@@ -1101,6 +1135,21 @@ class SqlAlchemyOpsGraphRepository:
                 stmt = stmt.where(ReplayRunRow.incident_id == incident_id)
             rows = session.scalars(stmt.order_by(ReplayRunRow.created_at.desc())).all()
             return [self._to_replay(row) for row in rows]
+
+    def list_replay_cases(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayCaseSummary]:
+        with self.session_factory() as session:
+            stmt = select(ReplayCaseRow).where(ReplayCaseRow.ops_workspace_id == workspace_id)
+            if incident_id is not None:
+                stmt = stmt.where(ReplayCaseRow.incident_id == incident_id)
+            rows = session.scalars(stmt.order_by(ReplayCaseRow.updated_at.desc())).all()
+            return [self._to_replay_case_summary(row) for row in rows]
+
+    def get_replay_case(self, replay_case_id: str) -> ReplayCaseDetail:
+        with self.session_factory() as session:
+            row = session.get(ReplayCaseRow, replay_case_id)
+            if row is None:
+                raise KeyError(replay_case_id)
+            return self._to_replay_case_detail(row)
 
     def get_replay_run(self, replay_run_id: str) -> ReplayRunSummary:
         with self.session_factory() as session:

@@ -538,12 +538,38 @@ Response:
     "status": "draft",
     "fact_set_version": 4,
     "artifact_id": null,
+    "replay_case_id": "uuid",
     "updated_at": "2026-03-16T09:40:00Z"
   }
 }
 ```
 
-### 5.13 `POST /api/v1/opsgraph/replays/run`
+### 5.13 `GET /api/v1/opsgraph/replay-cases`
+
+Purpose: list replay cases created from retrospective or curated replay snapshots.
+
+Auth: `viewer`
+
+Query params:
+
+- `workspace_id`
+- `incident_id`
+
+Response:
+
+- `200 OK`
+
+### 5.13.1 `GET /api/v1/opsgraph/replay-cases/:replayCaseId`
+
+Purpose: fetch one replay case including its persisted input snapshot.
+
+Auth: `viewer`
+
+Response:
+
+- `200 OK`
+
+### 5.14 `POST /api/v1/opsgraph/replays/run`
 
 Purpose: trigger replay for one incident or one replay case.
 
@@ -580,7 +606,7 @@ Response:
 }
 ```
 
-### 5.14 `GET /api/v1/opsgraph/replays`
+### 5.15 `GET /api/v1/opsgraph/replays`
 
 Purpose: list replay runs for one workspace or one incident.
 
@@ -842,4 +868,4 @@ Payload:
 5. Recommendation approval is bridged through shared `approval_task`
 6. Comms publish maps to `comms_draft` and appends `timeline_event`
 7. Resolve/close APIs map to `incident`, `incident_fact`, `timeline_event`, and later `postmortem`
-8. Replay trigger maps to shared `replay_case` / `replay_run`
+8. Replay trigger and replay-case read APIs map to shared `replay_case` / `replay_run`

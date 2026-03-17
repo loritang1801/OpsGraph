@@ -43,6 +43,8 @@ from .api_models import (
     OpsGraphRunResponse,
     OpsGraphWorkflowStateResponse,
     PostmortemSummary,
+    ReplayCaseDetail,
+    ReplayCaseSummary,
     ReplayRunCommand,
     ReplayStatusCommand,
     ReplayRunSummary,
@@ -178,6 +180,17 @@ def create_fastapi_app(service: OpsGraphAppService):
     @app.get("/api/v1/opsgraph/incidents/{incident_id}/postmortem", response_model=PostmortemSummary)
     def get_postmortem(incident_id: str) -> PostmortemSummary:
         return service.get_postmortem(incident_id)
+
+    @app.get("/api/v1/opsgraph/replay-cases", response_model=list[ReplayCaseSummary])
+    def list_replay_cases(
+        workspace_id: str,
+        incident_id: str | None = None,
+    ) -> list[ReplayCaseSummary]:
+        return service.list_replay_cases(workspace_id, incident_id)
+
+    @app.get("/api/v1/opsgraph/replay-cases/{replay_case_id}", response_model=ReplayCaseDetail)
+    def get_replay_case(replay_case_id: str) -> ReplayCaseDetail:
+        return service.get_replay_case(replay_case_id)
 
     @app.post("/api/v1/opsgraph/incidents/respond", response_model=OpsGraphRunResponse)
     def respond_to_incident(command: IncidentResponseCommand) -> OpsGraphRunResponse:

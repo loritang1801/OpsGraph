@@ -76,6 +76,7 @@ class PostmortemSummary(OpsGraphModel):
     status: str
     fact_set_version: int
     artifact_id: str | None = None
+    replay_case_id: str | None = None
     updated_at: datetime
 
 
@@ -89,6 +90,23 @@ class ReplayRunSummary(OpsGraphModel):
     current_state: str | None = None
     error_message: str | None = None
     created_at: datetime
+
+
+class ReplayCaseSummary(OpsGraphModel):
+    replay_case_id: str
+    incident_id: str
+    workflow_type: str
+    subject_type: str
+    subject_id: str
+    case_name: str
+    source_workflow_run_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReplayCaseDetail(ReplayCaseSummary):
+    input_snapshot: dict[str, Any] = Field(default_factory=dict)
+    expected_output: dict[str, Any] | None = None
 
 
 class ReplayNodeSummary(OpsGraphModel):

@@ -274,10 +274,29 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(result.current_state, "retrospective_completed")
         self.assertEqual(postmortem.status, "draft")
         self.assertEqual(workspace.incident.incident_status, "closed")
+        self.assertIsNotNone(postmortem.replay_case_id)
         self.assertIsNotNone(postmortem_row.replay_case_id)
         self.assertIsNotNone(replay_case_row)
         self.assertEqual(replay_case_row.incident_id, "incident-1")
         self.assertEqual(replay_case_row.input_snapshot_payload["incident_id"], "incident-1")
+
+    def test_list_and_get_replay_cases_from_postmortem_snapshot(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.resolve_incident("incident-1", resolve_incident_command())
+        service.build_retrospective(retrospective_command(workflow_run_id="opsgraph-retro-case-read"))
+        postmortem = service.get_postmortem("incident-1")
+
+        replay_cases = service.list_replay_cases("ops-ws-1", "incident-1")
+        replay_case = service.get_replay_case(postmortem.replay_case_id)
+
+        self.assertEqual(len(replay_cases), 1)
+        self.assertEqual(replay_cases[0].replay_case_id, postmortem.replay_case_id)
+        self.assertEqual(replay_case.incident_id, "incident-1")
+        self.assertEqual(replay_case.case_name, "INC-2026-0001 retrospective replay")
+        self.assertEqual(replay_case.input_snapshot["incident_id"], "incident-1")
+        self.assertEqual(replay_case.input_snapshot["target_channels"], ["internal_slack"])
 
     def test_resolve_requires_confirmed_root_cause_fact(self) -> None:
         service = build_app_service()

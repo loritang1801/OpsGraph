@@ -21,6 +21,8 @@ from .api_models import (
     OpsGraphRunResponse,
     OpsGraphWorkflowStateResponse,
     PostmortemSummary,
+    ReplayCaseDetail,
+    ReplayCaseSummary,
     ReplayBaselineCaptureCommand,
     ReplayBaselineSummary,
     ReplayEvaluationCommand,
@@ -179,6 +181,16 @@ class OpsGraphAppService:
 
     def list_replays(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayRunSummary]:
         return self.repository.list_replays(workspace_id, incident_id)
+
+    def list_replay_cases(
+        self,
+        workspace_id: str,
+        incident_id: str | None = None,
+    ) -> list[ReplayCaseSummary]:
+        return self.repository.list_replay_cases(workspace_id, incident_id)
+
+    def get_replay_case(self, replay_case_id: str) -> ReplayCaseDetail:
+        return self.repository.get_replay_case(replay_case_id)
 
     def list_replay_baselines(
         self,
