@@ -40,7 +40,7 @@
 - Replay evaluation now raises stable domain codes for not-executed runs and unavailable runtime dependencies
 - Incident execution seeds now include persisted signal ids and summaries instead of empty signal placeholders
 - Alert and replay submission routes now return `202 Accepted`, `routes.py` contains explicit domain-error-to-HTTP mapping logic for product APIs, and a Grafana webhook alias now lands on the same ingest flow
-- Alert ingest responses now also surface accepted-signal counts plus synthetic workflow-run linkage for the queued enrichment path
+- Alert ingest responses now also surface accepted-signal counts plus synthetic workflow-run linkage for the queued enrichment path, and alert ingest now emits `opsgraph.signal.ingested` plus incident created/updated outbox events for the product event stream
 - Alert ingest now supports persisted webhook idempotency keys, and incident/replay/report list routes now expose shared envelope metadata with cursor pagination
 - Fact add/retract, severity override, hypothesis decision, comms publish, resolve/close, and replay-run submission now also support persisted idempotency keys, and the remaining incident/replay read routes now emit shared envelopes instead of bare payloads
 - Shared health/workflow endpoints now also emit shared envelopes, `/api/v1/events/stream` now supports workspace/incident topic aliases with payload-backed event context fallback, and replay status updates now reject terminal-state regressions with `REPLAY_STATUS_CONFLICT`

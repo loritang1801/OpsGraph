@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Any, TypeVar
+from uuid import uuid4
 
 from .api_models import (
     ApprovalTaskSummary,
@@ -45,6 +47,7 @@ from .api_models import (
 from .repository import OpsGraphRepository
 from .replay_fixtures import seed_incident_response_replay_fixtures
 from .replay_reports import write_replay_report_artifacts
+from .shared_runtime import load_shared_agent_platform
 
 CommandT = TypeVar("CommandT", IncidentResponseCommand, RetrospectiveCommand)
 
@@ -711,6 +714,37 @@ class OpsGraphAppService:
             observed_at=command.observed_at,
             source=command.source,
         )
+        incident = self.repository.get_incident_workspace(response.incident_id).incident
+        self._emit_product_event(
+            event_name="opsgraph.signal.ingested",
+            workflow_run_id=response.workflow_run_id or f"opsgraph-alert-{response.signal_id}",
+            aggregate_type="incident",
+            aggregate_id=response.incident_id,
+            node_name="signal_ingested",
+            payload={
+                "signal_id": response.signal_id,
+                "source": command.source,
+                "dedupe_key": command.correlation_key,
+                "incident_id": response.incident_id,
+                "organization_id": command.organization_id,
+                "workspace_id": command.workspace_id,
+            },
+        )
+        self._emit_product_event(
+            event_name="opsgraph.incident.created" if response.incident_created else "opsgraph.incident.updated",
+            workflow_run_id=response.workflow_run_id or f"opsgraph-alert-{response.signal_id}",
+            aggregate_type="incident",
+            aggregate_id=response.incident_id,
+            node_name="incident_correlated",
+            payload={
+                "incident_id": response.incident_id,
+                "incident_key": incident.incident_key,
+                "severity": incident.severity,
+                "status": incident.incident_status,
+                "organization_id": command.organization_id,
+                "workspace_id": command.workspace_id,
+            },
+        )
         self._store_idempotent_response(
             operation="opsgraph.ingest_alert",
             idempotency_key=idempotency_key,
@@ -790,3 +824,30 @@ class OpsGraphAppService:
     def close(self) -> None:
         if self.runtime_stores is not None and hasattr(self.runtime_stores, "dispose"):
             self.runtime_stores.dispose()
+
+    def _emit_product_event(
+        self,
+        *,
+        event_name: str,
+        workflow_run_id: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        node_name: str,
+        payload: dict[str, object],
+    ) -> None:
+        if self.runtime_stores is None or not hasattr(self.runtime_stores, "outbox_store"):
+            return
+        shared_platform = self.shared_platform or load_shared_agent_platform()
+        self.runtime_stores.outbox_store.append(
+            shared_platform.OutboxEvent(
+                event_id=f"product-event-{uuid4().hex[:10]}",
+                event_name=event_name,
+                workflow_run_id=workflow_run_id,
+                workflow_type="opsgraph_alert_ingest",
+                node_name=node_name,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                payload=payload,
+                emitted_at=datetime.now(UTC),
+            )
+        )

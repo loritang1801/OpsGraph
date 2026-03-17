@@ -56,6 +56,22 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(ingest.accepted_signals, 1)
         self.assertIsNotNone(ingest.workflow_run_id)
 
+    def test_alert_ingest_emits_signal_and_incident_outbox_events(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        ingest = service.ingest_alert(alert_ingest_command())
+        pending = service.runtime_stores.outbox_store.list_pending()
+        matching_events = [
+            item.event
+            for item in pending
+            if item.event.workflow_run_id == ingest.workflow_run_id
+        ]
+        event_names = [event.event_name for event in matching_events]
+
+        self.assertIn("opsgraph.signal.ingested", event_names)
+        self.assertIn("opsgraph.incident.updated", event_names)
+
     def test_alert_ingest_is_idempotent_for_repeated_key(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
