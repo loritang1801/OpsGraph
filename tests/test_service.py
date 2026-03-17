@@ -141,6 +141,58 @@ class OpsGraphServiceTests(unittest.TestCase):
             any(item["correlation_key"] == "checkout-api:high-error-rate" for item in seed["signal_summaries"])
         )
 
+    def test_generated_incident_response_binds_comms_to_approval_task(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        ingest = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="inventory-api:error-burst",
+                summary="Inventory API error burst",
+                source="grafana",
+            )
+        )
+        command = service.repository.get_incident_execution_seed(ingest.incident_id) | {
+            "workflow_run_id": "opsgraph-generated-incident-1"
+        }
+        service.respond_to_incident(command)
+        workspace = service.get_incident_workspace(ingest.incident_id)
+
+        self.assertEqual(len(workspace.recommendations), 1)
+        self.assertEqual(len(workspace.approval_tasks), 1)
+        self.assertEqual(len(workspace.comms_drafts), 1)
+        self.assertEqual(
+            workspace.comms_drafts[0].approval_task_id,
+            workspace.approval_tasks[0].approval_task_id,
+        )
+
+        with self.assertRaisesRegex(ValueError, "APPROVAL_REQUIRED"):
+            service.publish_comms(
+                ingest.incident_id,
+                workspace.comms_drafts[0].draft_id,
+                comms_publish_command(
+                    expected_fact_set_version=workspace.incident.current_fact_set_version,
+                ),
+            )
+
+        service.decide_recommendation(
+            ingest.incident_id,
+            workspace.recommendations[0].recommendation_id,
+            recommendation_decision_command(
+                approval_task_id=workspace.approval_tasks[0].approval_task_id,
+            ),
+        )
+        published = service.publish_comms(
+            ingest.incident_id,
+            workspace.comms_drafts[0].draft_id,
+            comms_publish_command(
+                expected_fact_set_version=workspace.incident.current_fact_set_version,
+                approval_task_id=workspace.approval_tasks[0].approval_task_id,
+            ),
+        )
+
+        self.assertEqual(published.status, "published")
+
     def test_get_approval_task_returns_linked_task(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)

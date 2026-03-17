@@ -1612,12 +1612,14 @@ class SqlAlchemyOpsGraphRepository:
                     )
                 )
 
-            recommendation_exists = session.scalar(
-                select(RecommendationRow.recommendation_id)
+            recommendation_row = session.scalars(
+                select(RecommendationRow)
                 .where(RecommendationRow.incident_id == incident_id)
+                .order_by(RecommendationRow.created_at.asc())
                 .limit(1)
-            )
-            if recommendation_exists is None:
+            ).first()
+            approval_task_id = recommendation_row.approval_task_id if recommendation_row is not None else None
+            if recommendation_row is None:
                 approval_task_id = f"approval-task-{uuid4().hex[:8]}"
                 session.add(
                     RecommendationRow(
@@ -1658,7 +1660,7 @@ class SqlAlchemyOpsGraphRepository:
                         title="Generated incident update",
                         status="draft",
                         fact_set_version=incident_row.current_fact_set_version,
-                        approval_task_id=None,
+                        approval_task_id=approval_task_id,
                         published_message_ref=None,
                         created_at=self._utcnow_naive(),
                         updated_at=self._utcnow_naive(),

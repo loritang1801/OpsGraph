@@ -28,7 +28,7 @@
 - Approval tasks can now be listed per incident and fetched directly for operator workbench/read-side integrations
 - Incident workspace reads now include persisted signals and approval tasks alongside recommendations, comms drafts, and timeline data
 - Recommendation execution now enforces tighter terminal-state and approval-task conflict rules
-- Comms publish now rejects stale fact-set drafts and requires the bound approved approval task when present
+- Workflow-generated comms drafts now inherit the generated recommendation approval task, and comms publish rejects stale fact-set drafts and requires the bound approved approval task when present
 - Comms draft listing now supports `channel` and `status` filters and exposes approval-task linkage plus created timestamps
 - Resolve/close transitions now enforce root-cause fact presence and resolved-before-close invariants
 - Replay runs now execute both incident-backed and replay-case-backed requests through the shared workflow replay path
