@@ -1,6 +1,6 @@
 # OpsGraph Agent Context
 
-- Date: 2026-03-16
+- Date: 2026-03-17
 - Product: incident response, recommendation, communication, and retrospective multi-agent system
 
 ## Completed Design Layers
@@ -24,6 +24,9 @@
 - `app.py` exposes a FastAPI factory over the shared workflow API
 - Implemented product APIs now include facts, hypothesis decisions, recommendation decisions, severity override, comms publish, resolve/close, postmortem lookup, replay submission, and replay status progression
 - Recommendation approval now bridges through a persisted approval-task row linked to recommendation state
+- Recommendation execution now enforces tighter terminal-state and approval-task conflict rules
+- Comms publish now rejects stale fact-set drafts and requires the bound approved approval task when present
+- Resolve/close transitions now enforce root-cause fact presence and resolved-before-close invariants
 - Replay runs can now seed file-backed replay fixtures under `replay_fixtures/`, execute the shared `opsgraph_incident_response` workflow through `ReplayFixtureLoader`, and persist workflow run linkage/current state back to the replay row
 - Replay baseline capture and evaluation reporting are now implemented end-to-end, with baseline/replay report persistence, node-level diffs, latency deltas, and JSON/Markdown artifacts under `replay_reports/`
 - `scripts/run_replay_report.py` now runs local baseline capture -> replay -> compare and emits artifact paths in the returned report payload
@@ -39,10 +42,10 @@
 
 ## First Implementation Targets
 
-1. Add stricter terminal-state conflict handling for recommendation execution and comms approval
-2. Expand replay evaluation from report generation into richer comparison metrics and artifact export coverage
-3. Add recommendation approval execution and comms orchestration beyond current state mutation flow
-4. Add service/repository tests for stale fact-set, approval, stale-resource, and replay-failure edge cases
+1. Expand replay evaluation from report generation into richer comparison metrics and artifact export coverage
+2. Add recommendation approval execution and comms orchestration beyond current state mutation flow
+3. Add replay-case execution beyond the current workflow-run path
+4. Add broader failure-path coverage for replay execution, route-level error mapping, and approval orchestration
 
 ## Local Note
 

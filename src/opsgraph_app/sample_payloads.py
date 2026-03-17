@@ -132,10 +132,14 @@ def severity_override_command(*, severity: str = "sev2", reason: str = "Impact c
     }
 
 
-def comms_publish_command(*, expected_fact_set_version: int = 1) -> dict:
+def comms_publish_command(
+    *,
+    expected_fact_set_version: int = 1,
+    approval_task_id: str | None = None,
+) -> dict:
     return {
         "expected_fact_set_version": expected_fact_set_version,
-        "approval_task_id": None,
+        "approval_task_id": approval_task_id,
     }
 
 

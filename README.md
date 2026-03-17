@@ -4,7 +4,7 @@
 
 ## Current State
 
-This folder currently contains decision-complete product and engineering specifications plus an initialized repo skeleton for future implementation.
+This folder now contains the product specs plus a working product-layer implementation under `src/opsgraph_app/`.
 
 Available documents:
 
@@ -37,7 +37,7 @@ Product-specific thin adapters now live under `src/opsgraph_app/`.
 - Build a domain-facing application service from `opsgraph_app.bootstrap.build_app_service`
 - Use `opsgraph_app.app:create_app` as a FastAPI factory when `fastapi` is installed
 - Default product repository is now SQLAlchemy-backed and shares the same runtime engine/session as the workflow layer
-- Current product API covers alert intake, incident list/workspace queries, fact mutation, severity override, comms publish, resolve/close, replay, and workflow-backed incident response plus retrospective flows
+- Current product API covers alert intake, incident list/workspace queries, fact mutation, recommendation/comms decisions, resolve/close, replay, and workflow-backed incident response plus retrospective flows
 - Run the local workflow smoke script:
 
 ```powershell

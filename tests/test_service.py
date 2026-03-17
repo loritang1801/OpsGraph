@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from opsgraph_app.bootstrap import build_app_service
+from opsgraph_app.repository import ApprovalTaskRow, CommsDraftRow
 from opsgraph_app.sample_payloads import (
     alert_ingest_command,
     close_incident_command,
@@ -50,6 +51,7 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.addCleanup(service.close)
 
         hypotheses = service.list_hypotheses("incident-1")
+        published = service.publish_comms("incident-1", "draft-1", comms_publish_command())
         created_fact = service.add_fact("incident-1", fact_create_command())
         retracted_fact = service.retract_fact("incident-1", created_fact.fact_id, fact_retract_command())
         hypothesis = service.decide_hypothesis("incident-1", "hypothesis-1", hypothesis_decision_command())
@@ -59,7 +61,6 @@ class OpsGraphServiceTests(unittest.TestCase):
             recommendation_decision_command(),
         )
         severity = service.override_severity("incident-1", severity_override_command())
-        published = service.publish_comms("incident-1", "draft-1", comms_publish_command())
         replay = service.start_replay_run(replay_run_command())
         replay_updated = service.update_replay_status(replay.replay_run_id, replay_status_command())
         replays = service.list_replays("ops-ws-1", "incident-1")
@@ -77,6 +78,104 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertGreaterEqual(len(replays), 1)
         self.assertEqual(len(workspace.hypotheses), 1)
         self.assertEqual(workspace.recommendations[0].approval_task_id, "approval-task-1")
+
+    def test_recommendation_execution_requires_approval_and_conflicts_after_terminal(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        with self.assertRaisesRegex(ValueError, "APPROVAL_REQUIRED"):
+            service.decide_recommendation(
+                "incident-1",
+                "recommendation-1",
+                recommendation_decision_command(decision="mark_executed"),
+            )
+
+        approved = service.decide_recommendation(
+            "incident-1",
+            "recommendation-1",
+            recommendation_decision_command(),
+        )
+        executed = service.decide_recommendation(
+            "incident-1",
+            "recommendation-1",
+            recommendation_decision_command(decision="mark_executed"),
+        )
+
+        self.assertEqual(approved.status, "approved")
+        self.assertEqual(executed.status, "executed")
+        with self.assertRaisesRegex(ValueError, "RECOMMENDATION_STATUS_CONFLICT"):
+            service.decide_recommendation(
+                "incident-1",
+                "recommendation-1",
+                recommendation_decision_command(decision="reject"),
+            )
+
+    def test_recommendation_rejects_mismatched_approval_task(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        with self.assertRaisesRegex(ValueError, "APPROVAL_REQUIRED"):
+            service.decide_recommendation(
+                "incident-1",
+                "recommendation-1",
+                recommendation_decision_command(approval_task_id="approval-task-wrong"),
+            )
+
+    def test_publish_comms_rejects_stale_fact_set(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.add_fact("incident-1", fact_create_command())
+
+        with self.assertRaisesRegex(ValueError, "COMM_DRAFT_STALE_FACT_SET"):
+            service.publish_comms(
+                "incident-1",
+                "draft-1",
+                comms_publish_command(expected_fact_set_version=1),
+            )
+
+    def test_publish_comms_requires_matching_approved_task(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        now = service.repository._utcnow_naive()
+        with service.repository.session_factory.begin() as session:
+            session.add(
+                ApprovalTaskRow(
+                    approval_task_id="approval-task-draft-1",
+                    incident_id="incident-1",
+                    recommendation_id=None,
+                    status="approved",
+                    comment="Approved for publish.",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            draft_row = session.get(CommsDraftRow, "draft-1")
+            self.assertIsNotNone(draft_row)
+            draft_row.approval_task_id = "approval-task-draft-1"
+            draft_row.updated_at = now
+
+        with self.assertRaisesRegex(ValueError, "APPROVAL_REQUIRED"):
+            service.publish_comms(
+                "incident-1",
+                "draft-1",
+                comms_publish_command(
+                    expected_fact_set_version=1,
+                    approval_task_id="approval-task-wrong",
+                ),
+            )
+
+        published = service.publish_comms(
+            "incident-1",
+            "draft-1",
+            comms_publish_command(
+                expected_fact_set_version=1,
+                approval_task_id="approval-task-draft-1",
+            ),
+        )
+
+        self.assertEqual(published.status, "published")
 
     def test_execute_replay_run_triggers_workflow_and_marks_completed(self) -> None:
         service = build_app_service()
@@ -137,15 +236,51 @@ class OpsGraphServiceTests(unittest.TestCase):
         resolved = service.resolve_incident("incident-1", resolve_incident_command())
         result = service.build_retrospective(retrospective_command(workflow_run_id="opsgraph-retro-1"))
         postmortem = service.get_postmortem("incident-1")
-        closed = service.close_incident("incident-1", close_incident_command())
         workspace = service.get_incident_workspace("incident-1")
 
         self.assertEqual(resolved.incident_status, "resolved")
         self.assertEqual(result.workflow_name, "opsgraph_retrospective")
         self.assertEqual(result.current_state, "retrospective_completed")
         self.assertEqual(postmortem.status, "draft")
-        self.assertEqual(closed.incident_status, "closed")
         self.assertEqual(workspace.incident.incident_status, "closed")
+
+    def test_resolve_requires_confirmed_root_cause_fact(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        with self.assertRaisesRegex(ValueError, "ROOT_CAUSE_FACT_REQUIRED"):
+            service.resolve_incident(
+                "incident-1",
+                {
+                    "resolution_summary": "Rollback restored service.",
+                    "root_cause_fact_ids": [],
+                },
+            )
+
+        with self.assertRaisesRegex(ValueError, "ROOT_CAUSE_FACT_REQUIRED"):
+            service.resolve_incident(
+                "incident-1",
+                {
+                    "resolution_summary": "Rollback restored service.",
+                    "root_cause_fact_ids": ["fact-missing"],
+                },
+            )
+
+    def test_close_requires_resolved_incident_and_resolve_conflicts_after_terminal(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        with self.assertRaisesRegex(ValueError, "INCIDENT_NOT_RESOLVED"):
+            service.close_incident("incident-1", close_incident_command())
+
+        resolved = service.resolve_incident("incident-1", resolve_incident_command())
+        self.assertEqual(resolved.incident_status, "resolved")
+
+        with self.assertRaisesRegex(ValueError, "INCIDENT_ALREADY_RESOLVED"):
+            service.resolve_incident("incident-1", resolve_incident_command())
+
+        closed = service.close_incident("incident-1", close_incident_command())
+        self.assertEqual(closed.incident_status, "closed")
 
     def test_sqlalchemy_repository_persists_incident_updates_across_service_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

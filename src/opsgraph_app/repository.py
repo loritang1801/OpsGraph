@@ -845,11 +845,24 @@ class SqlAlchemyOpsGraphRepository:
             approval_row = None
             if recommendation_row.approval_task_id is not None:
                 approval_row = session.get(ApprovalTaskRow, recommendation_row.approval_task_id)
+                if approval_row is not None and (
+                    approval_row.incident_id != incident_id
+                    or approval_row.recommendation_id != recommendation_id
+                ):
+                    raise ValueError("APPROVAL_REQUIRED")
             if command.expected_updated_at is not None and not self._timestamps_match(
                 recommendation_row.updated_at,
                 command.expected_updated_at,
             ):
                 raise ValueError("CONFLICT_STALE_RESOURCE")
+            if recommendation_row.status in {"executed", "rejected"}:
+                raise ValueError("RECOMMENDATION_STATUS_CONFLICT")
+            if (
+                command.approval_task_id is not None
+                and recommendation_row.approval_task_id is not None
+                and command.approval_task_id != recommendation_row.approval_task_id
+            ):
+                raise ValueError("APPROVAL_REQUIRED")
             if recommendation_row.approval_required and command.decision in {"approve", "mark_executed", "reject"}:
                 if approval_row is None and not command.approval_task_id:
                     raise ValueError("APPROVAL_REQUIRED")
@@ -868,12 +881,16 @@ class SqlAlchemyOpsGraphRepository:
                 elif approval_row is not None:
                     recommendation_row.approval_task_id = approval_row.approval_task_id
             if command.decision == "approve":
+                if recommendation_row.status == "approved":
+                    raise ValueError("RECOMMENDATION_STATUS_CONFLICT")
                 recommendation_row.status = "approved"
                 if approval_row is not None:
                     approval_row.status = "approved"
                     approval_row.comment = command.comment or None
                     approval_row.updated_at = self._utcnow_naive()
             elif command.decision == "reject":
+                if recommendation_row.status == "approved":
+                    raise ValueError("RECOMMENDATION_STATUS_CONFLICT")
                 recommendation_row.status = "rejected"
                 if approval_row is not None:
                     approval_row.status = "rejected"
@@ -882,6 +899,8 @@ class SqlAlchemyOpsGraphRepository:
             else:
                 if recommendation_row.approval_required and (approval_row is None or approval_row.status != "approved"):
                     raise ValueError("APPROVAL_REQUIRED")
+                if recommendation_row.approval_required and recommendation_row.status != "approved":
+                    raise ValueError("RECOMMENDATION_STATUS_CONFLICT")
                 recommendation_row.status = "executed"
             recommendation_row.updated_at = self._utcnow_naive()
             incident_row.updated_at = self._utcnow_naive()
@@ -910,14 +929,22 @@ class SqlAlchemyOpsGraphRepository:
             comms_row = session.get(CommsDraftRow, draft_id)
             if incident_row is None or comms_row is None or comms_row.incident_id != incident_id:
                 raise KeyError(draft_id)
+            if comms_row.status == "published":
+                raise ValueError("COMM_DRAFT_ALREADY_PUBLISHED")
+            if incident_row.current_fact_set_version != comms_row.fact_set_version:
+                raise ValueError("COMM_DRAFT_STALE_FACT_SET")
             if comms_row.fact_set_version != command.expected_fact_set_version:
                 raise ValueError("COMM_DRAFT_STALE_FACT_SET")
             if comms_row.approval_task_id is not None:
-                approval_row = session.get(ApprovalTaskRow, comms_row.approval_task_id)
-                if approval_row is None or approval_row.status != "approved":
+                if command.approval_task_id != comms_row.approval_task_id:
                     raise ValueError("APPROVAL_REQUIRED")
-            if comms_row.status == "published":
-                raise ValueError("COMM_DRAFT_ALREADY_PUBLISHED")
+                approval_row = session.get(ApprovalTaskRow, comms_row.approval_task_id)
+                if (
+                    approval_row is None
+                    or approval_row.incident_id != incident_id
+                    or approval_row.status != "approved"
+                ):
+                    raise ValueError("APPROVAL_REQUIRED")
             comms_row.status = "published"
             comms_row.published_message_ref = f"{comms_row.channel}-msg-{uuid4().hex[:8]}"
             comms_row.updated_at = self._utcnow_naive()
@@ -947,6 +974,20 @@ class SqlAlchemyOpsGraphRepository:
                 command.expected_updated_at,
             ):
                 raise ValueError("CONFLICT_STALE_RESOURCE")
+            if incident_row.incident_status in {"resolved", "closed"}:
+                raise ValueError("INCIDENT_ALREADY_RESOLVED")
+            if not command.root_cause_fact_ids:
+                raise ValueError("ROOT_CAUSE_FACT_REQUIRED")
+            confirmed_root_cause_fact_ids = set(
+                session.scalars(
+                    select(IncidentFactRow.fact_id)
+                    .where(IncidentFactRow.incident_id == incident_id)
+                    .where(IncidentFactRow.status == "confirmed")
+                    .where(IncidentFactRow.fact_id.in_(tuple(command.root_cause_fact_ids)))
+                ).all()
+            )
+            if len(confirmed_root_cause_fact_ids) != len(set(command.root_cause_fact_ids)):
+                raise ValueError("ROOT_CAUSE_FACT_REQUIRED")
             incident_row.incident_status = "resolved"
             incident_row.updated_at = self._utcnow_naive()
             session.add(
@@ -970,6 +1011,8 @@ class SqlAlchemyOpsGraphRepository:
                 command.expected_updated_at,
             ):
                 raise ValueError("CONFLICT_STALE_RESOURCE")
+            if incident_row.incident_status != "resolved":
+                raise ValueError("INCIDENT_NOT_RESOLVED")
             incident_row.incident_status = "closed"
             incident_row.updated_at = self._utcnow_naive()
             session.add(
