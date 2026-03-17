@@ -40,7 +40,6 @@ from .api_models import (
 from .repository import OpsGraphRepository
 from .replay_fixtures import seed_incident_response_replay_fixtures
 from .replay_reports import write_replay_report_artifacts
-from .sample_payloads import replay_case_payload
 
 CommandT = TypeVar("CommandT", IncidentResponseCommand, RetrospectiveCommand)
 
@@ -211,7 +210,7 @@ class OpsGraphAppService:
             if self.shared_platform is None or self.workflow_registry is None or self.prompt_service is None:
                 raise ValueError("Replay execution requires shared platform runtime components")
             if replay.replay_case_id is not None:
-                seed = replay_case_payload(replay_case_id=replay.replay_case_id)
+                seed = self.repository.get_replay_case_input_snapshot(replay.replay_case_id)
             else:
                 seed = self.repository.get_incident_execution_seed(replay.incident_id)
             workflow_run_id = f"{replay_run_id}-replay"

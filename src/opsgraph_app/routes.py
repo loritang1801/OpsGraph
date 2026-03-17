@@ -2,6 +2,19 @@ from __future__ import annotations
 
 import importlib
 
+ERROR_STATUS_BY_CODE = {
+    "CONFLICT_STALE_RESOURCE": 409,
+    "FACT_VERSION_CONFLICT": 409,
+    "HYPOTHESIS_STATUS_CONFLICT": 409,
+    "RECOMMENDATION_STATUS_CONFLICT": 409,
+    "APPROVAL_REQUIRED": 409,
+    "COMM_DRAFT_STALE_FACT_SET": 409,
+    "COMM_DRAFT_ALREADY_PUBLISHED": 409,
+    "INCIDENT_ALREADY_RESOLVED": 409,
+    "INCIDENT_NOT_RESOLVED": 409,
+    "ROOT_CAUSE_FACT_REQUIRED": 422,
+}
+
 from .api_models import (
     AlertIngestCommand,
     AlertIngestResponse,
@@ -41,10 +54,23 @@ from .service import OpsGraphAppService
 from .shared_runtime import load_shared_agent_platform
 
 
+def map_domain_error(exc: Exception, *, path: str = "") -> tuple[int, dict[str, object]]:
+    if isinstance(exc, KeyError):
+        code = "INCIDENT_NOT_FOUND" if "/incidents/" in path else "RESOURCE_NOT_FOUND"
+        resource_id = str(exc.args[0]) if exc.args else "resource"
+        return 404, {"error": {"code": code, "message": f"{code}: {resource_id}"}}
+    if isinstance(exc, ValueError):
+        code = str(exc)
+        status_code = ERROR_STATUS_BY_CODE.get(code, 400)
+        return status_code, {"error": {"code": code, "message": code}}
+    return 500, {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}}
+
+
 def create_fastapi_app(service: OpsGraphAppService):
     ap = load_shared_agent_platform()
     try:
-        from fastapi import FastAPI
+        from fastapi import FastAPI, Request
+        from fastapi.responses import JSONResponse
     except ImportError as exc:
         errors_module = importlib.import_module(f"{ap.__name__}.errors")
         FastAPIUnavailableError = errors_module.FastAPIUnavailableError
@@ -52,6 +78,16 @@ def create_fastapi_app(service: OpsGraphAppService):
         raise FastAPIUnavailableError("fastapi is not installed") from exc
 
     app = FastAPI(title="OpsGraph API")
+
+    @app.exception_handler(KeyError)
+    def handle_key_error(request: Request, exc: KeyError):
+        status_code, payload = map_domain_error(exc, path=str(request.url.path))
+        return JSONResponse(status_code=status_code, content=payload)
+
+    @app.exception_handler(ValueError)
+    def handle_value_error(request: Request, exc: ValueError):
+        status_code, payload = map_domain_error(exc, path=str(request.url.path))
+        return JSONResponse(status_code=status_code, content=payload)
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:

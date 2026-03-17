@@ -102,6 +102,8 @@ class OpsGraphRepository(Protocol):
 
     def get_replay_run(self, replay_run_id: str) -> ReplayRunSummary: ...
 
+    def get_replay_case_input_snapshot(self, replay_case_id: str) -> dict[str, object]: ...
+
     def mark_replay_execution(
         self,
         replay_run_id: str,
@@ -283,6 +285,24 @@ class PostmortemRow(Base):
     status: Mapped[str] = mapped_column(String(50))
     fact_set_version: Mapped[int] = mapped_column(Integer)
     artifact_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    replay_case_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class ReplayCaseRow(Base):
+    __tablename__ = "opsgraph_replay_case"
+
+    replay_case_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    ops_workspace_id: Mapped[str] = mapped_column(String(255), index=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    workflow_type: Mapped[str] = mapped_column(String(100))
+    subject_type: Mapped[str] = mapped_column(String(100))
+    subject_id: Mapped[str] = mapped_column(String(255), index=True)
+    case_name: Mapped[str] = mapped_column(String(255))
+    input_snapshot_payload: Mapped[dict] = mapped_column(JSON)
+    expected_output_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    source_workflow_run_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
 
 
@@ -1046,8 +1066,11 @@ class SqlAlchemyOpsGraphRepository:
                 incident_id = incident_row.incident_id
                 ops_workspace_id = incident_row.ops_workspace_id
             else:
-                incident_id = f"replay-case:{command.replay_case_id}"
-                ops_workspace_id = "ops-ws-1"
+                replay_case_row = session.get(ReplayCaseRow, command.replay_case_id)
+                if replay_case_row is None:
+                    raise KeyError(command.replay_case_id)
+                incident_id = replay_case_row.incident_id
+                ops_workspace_id = replay_case_row.ops_workspace_id
             session.add(
                 ReplayRunRow(
                     replay_run_id=replay_run_id,
@@ -1085,6 +1108,13 @@ class SqlAlchemyOpsGraphRepository:
             if row is None:
                 raise KeyError(replay_run_id)
             return self._to_replay(row)
+
+    def get_replay_case_input_snapshot(self, replay_case_id: str) -> dict[str, object]:
+        with self.session_factory() as session:
+            row = session.get(ReplayCaseRow, replay_case_id)
+            if row is None:
+                raise KeyError(replay_case_id)
+            return dict(row.input_snapshot_payload)
 
     def record_replay_baseline(
         self,
@@ -1287,41 +1317,7 @@ class SqlAlchemyOpsGraphRepository:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
                 raise KeyError(incident_id)
-            fact_rows = session.scalars(
-                select(IncidentFactRow)
-                .where(IncidentFactRow.incident_id == incident_id)
-                .where(IncidentFactRow.status == "confirmed")
-                .order_by(IncidentFactRow.created_at.asc())
-            ).all()
-            hypothesis_rows = session.scalars(
-                select(HypothesisRow)
-                .where(HypothesisRow.incident_id == incident_id)
-                .where(HypothesisRow.status != "rejected")
-                .order_by(HypothesisRow.rank.asc())
-            ).all()
-            comms_rows = session.scalars(
-                select(CommsDraftRow)
-                .where(CommsDraftRow.incident_id == incident_id)
-                .order_by(CommsDraftRow.created_at.asc())
-            ).all()
-            return {
-                "incident_id": incident_row.incident_id,
-                "ops_workspace_id": incident_row.ops_workspace_id,
-                "signal_ids": [],
-                "signal_summaries": [],
-                "current_incident_candidates": [],
-                "context_bundle_id": "context-1",
-                "current_fact_set_version": incident_row.current_fact_set_version,
-                "confirmed_fact_refs": [
-                    {"kind": "incident_fact", "id": row.fact_id} for row in fact_rows
-                ],
-                "top_hypothesis_refs": [
-                    {"kind": "hypothesis", "id": row.hypothesis_id} for row in hypothesis_rows[:3]
-                ],
-                "target_channels": [row.channel for row in comms_rows] or ["internal_slack"],
-                "organization_id": "org-1",
-                "workspace_id": "ws-1",
-            }
+            return self._build_incident_execution_seed(session, incident_row)
 
     def record_incident_response_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None:
         with self.session_factory.begin() as session:
@@ -1429,6 +1425,7 @@ class SqlAlchemyOpsGraphRepository:
                 select(PostmortemRow).where(PostmortemRow.incident_id == incident_id).limit(1)
             ).first()
             if postmortem_row is None:
+                replay_case_id = f"replay-case-{uuid4().hex[:8]}"
                 session.add(
                     PostmortemRow(
                         postmortem_id=f"postmortem-{uuid4().hex[:8]}",
@@ -1436,13 +1433,40 @@ class SqlAlchemyOpsGraphRepository:
                         status="draft",
                         fact_set_version=incident_row.current_fact_set_version,
                         artifact_id=None,
+                        replay_case_id=replay_case_id,
                         updated_at=now,
                     )
                 )
             else:
+                replay_case_id = postmortem_row.replay_case_id or f"replay-case-{uuid4().hex[:8]}"
                 postmortem_row.status = "draft"
                 postmortem_row.fact_set_version = incident_row.current_fact_set_version
+                postmortem_row.replay_case_id = replay_case_id
                 postmortem_row.updated_at = now
+            replay_case_row = session.get(ReplayCaseRow, replay_case_id)
+            input_snapshot = self._build_incident_execution_seed(session, incident_row)
+            if replay_case_row is None:
+                session.add(
+                    ReplayCaseRow(
+                        replay_case_id=replay_case_id,
+                        ops_workspace_id=incident_row.ops_workspace_id,
+                        incident_id=incident_id,
+                        workflow_type="opsgraph_incident",
+                        subject_type="incident",
+                        subject_id=incident_id,
+                        case_name=f"{incident_row.incident_key} retrospective replay",
+                        input_snapshot_payload=input_snapshot,
+                        expected_output_payload=None,
+                        source_workflow_run_id=workflow_run_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            else:
+                replay_case_row.input_snapshot_payload = input_snapshot
+                replay_case_row.case_name = f"{incident_row.incident_key} retrospective replay"
+                replay_case_row.source_workflow_run_id = workflow_run_id
+                replay_case_row.updated_at = now
 
     @staticmethod
     def _normalize_timestamp(value: datetime | None) -> datetime | None:
@@ -1459,6 +1483,44 @@ class SqlAlchemyOpsGraphRepository:
     @classmethod
     def _timestamps_match(cls, stored: datetime, expected: datetime) -> bool:
         return cls._normalize_timestamp(stored) == cls._normalize_timestamp(expected)
+
+    @staticmethod
+    def _build_incident_execution_seed(session: Session, incident_row: IncidentRow) -> dict[str, object]:
+        fact_rows = session.scalars(
+            select(IncidentFactRow)
+            .where(IncidentFactRow.incident_id == incident_row.incident_id)
+            .where(IncidentFactRow.status == "confirmed")
+            .order_by(IncidentFactRow.created_at.asc())
+        ).all()
+        hypothesis_rows = session.scalars(
+            select(HypothesisRow)
+            .where(HypothesisRow.incident_id == incident_row.incident_id)
+            .where(HypothesisRow.status != "rejected")
+            .order_by(HypothesisRow.rank.asc())
+        ).all()
+        comms_rows = session.scalars(
+            select(CommsDraftRow)
+            .where(CommsDraftRow.incident_id == incident_row.incident_id)
+            .order_by(CommsDraftRow.created_at.asc())
+        ).all()
+        return {
+            "incident_id": incident_row.incident_id,
+            "ops_workspace_id": incident_row.ops_workspace_id,
+            "signal_ids": [],
+            "signal_summaries": [],
+            "current_incident_candidates": [],
+            "context_bundle_id": "context-1",
+            "current_fact_set_version": incident_row.current_fact_set_version,
+            "confirmed_fact_refs": [
+                {"kind": "incident_fact", "id": row.fact_id} for row in fact_rows
+            ],
+            "top_hypothesis_refs": [
+                {"kind": "hypothesis", "id": row.hypothesis_id} for row in hypothesis_rows[:3]
+            ],
+            "target_channels": [row.channel for row in comms_rows] or ["internal_slack"],
+            "organization_id": "org-1",
+            "workspace_id": "ws-1",
+        }
 
     @staticmethod
     def _next_incident_number(session: Session) -> int:

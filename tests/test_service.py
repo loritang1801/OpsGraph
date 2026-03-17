@@ -6,13 +6,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from sqlalchemy import select
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from opsgraph_app.bootstrap import build_app_service
-from opsgraph_app.repository import ApprovalTaskRow, CommsDraftRow
+from opsgraph_app.repository import ApprovalTaskRow, CommsDraftRow, PostmortemRow, ReplayCaseRow
 from opsgraph_app.sample_payloads import (
     alert_ingest_command,
     close_incident_command,
@@ -195,11 +197,20 @@ class OpsGraphServiceTests(unittest.TestCase):
         service = build_app_service()
         self.addCleanup(service.close)
 
-        replay = service.start_replay_run(replay_case_run_command(replay_case_id="checkout-latency-regression"))
+        service.resolve_incident("incident-1", resolve_incident_command())
+        service.build_retrospective(retrospective_command(workflow_run_id="opsgraph-retro-replay-case"))
+        with service.repository.session_factory() as session:
+            postmortem_row = session.scalars(
+                select(PostmortemRow).where(PostmortemRow.incident_id == "incident-1")
+            ).first()
+            self.assertIsNotNone(postmortem_row)
+            replay_case_id = postmortem_row.replay_case_id
+
+        replay = service.start_replay_run(replay_case_run_command(replay_case_id=replay_case_id))
         executed = service.execute_replay_run(replay.replay_run_id)
         state = service.get_workflow_state(executed.workflow_run_id)
 
-        self.assertEqual(replay.replay_case_id, "checkout-latency-regression")
+        self.assertEqual(replay.replay_case_id, replay_case_id)
         self.assertEqual(executed.status, "completed")
         self.assertEqual(executed.current_state, "resolve")
         self.assertEqual(state.current_state, "resolve")
@@ -251,12 +262,22 @@ class OpsGraphServiceTests(unittest.TestCase):
         result = service.build_retrospective(retrospective_command(workflow_run_id="opsgraph-retro-1"))
         postmortem = service.get_postmortem("incident-1")
         workspace = service.get_incident_workspace("incident-1")
+        with service.repository.session_factory() as session:
+            postmortem_row = session.scalars(
+                select(PostmortemRow).where(PostmortemRow.incident_id == "incident-1")
+            ).first()
+            self.assertIsNotNone(postmortem_row)
+            replay_case_row = session.get(ReplayCaseRow, postmortem_row.replay_case_id)
 
         self.assertEqual(resolved.incident_status, "resolved")
         self.assertEqual(result.workflow_name, "opsgraph_retrospective")
         self.assertEqual(result.current_state, "retrospective_completed")
         self.assertEqual(postmortem.status, "draft")
         self.assertEqual(workspace.incident.incident_status, "closed")
+        self.assertIsNotNone(postmortem_row.replay_case_id)
+        self.assertIsNotNone(replay_case_row)
+        self.assertEqual(replay_case_row.incident_id, "incident-1")
+        self.assertEqual(replay_case_row.input_snapshot_payload["incident_id"], "incident-1")
 
     def test_resolve_requires_confirmed_root_cause_fact(self) -> None:
         service = build_app_service()
