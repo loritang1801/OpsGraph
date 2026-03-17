@@ -685,6 +685,44 @@ class OpsGraphServiceTests(unittest.TestCase):
 
         self.assertTrue(any(event.payload.get("postmortem_status") == "draft" for event in matching))
 
+    def test_list_postmortems_supports_workspace_incident_and_status_filters(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.resolve_incident("incident-1", resolve_incident_command())
+        first = service.build_retrospective(retrospective_command(workflow_run_id="opsgraph-postmortem-list-1"))
+        ingest = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="catalog-api:error-spike",
+                summary="Catalog API error spike",
+                source="grafana",
+            )
+        )
+        created_fact = service.add_fact(ingest.incident_id, fact_create_command())
+        service.resolve_incident(
+            ingest.incident_id,
+            resolve_incident_command() | {"root_cause_fact_ids": [created_fact.fact_id]},
+        )
+        service.build_retrospective(
+            retrospective_command(workflow_run_id="opsgraph-postmortem-list-2")
+            | {
+                "incident_id": ingest.incident_id,
+                "current_fact_set_version": 2,
+                "confirmed_fact_refs": [{"kind": "incident_fact", "id": created_fact.fact_id}],
+                "timeline_refs": [],
+                "resolution_summary": "Scaled catalog workers and drained the queue.",
+            }
+        )
+
+        all_items = service.list_postmortems("ops-ws-1")
+        incident_one = service.list_postmortems("ops-ws-1", incident_id="incident-1")
+        drafts = service.list_postmortems("ops-ws-1", status="draft")
+
+        self.assertEqual(first.current_state, "retrospective_completed")
+        self.assertEqual(len(all_items), 2)
+        self.assertEqual(incident_one[0].incident_id, "incident-1")
+        self.assertEqual(len(drafts), 2)
+
     def test_list_and_get_replay_cases_from_postmortem_snapshot(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)

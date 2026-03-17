@@ -119,6 +119,14 @@ class OpsGraphRepository(Protocol):
 
     def get_postmortem(self, incident_id: str) -> PostmortemSummary: ...
 
+    def list_postmortems(
+        self,
+        workspace_id: str,
+        *,
+        incident_id: str | None = None,
+        status: str | None = None,
+    ) -> list[PostmortemSummary]: ...
+
     def start_replay_run(self, command: ReplayRunCommand) -> ReplayRunSummary: ...
 
     def list_replays(
@@ -1329,6 +1337,26 @@ class SqlAlchemyOpsGraphRepository:
             if row is None:
                 raise KeyError(incident_id)
             return self._to_postmortem(row)
+
+    def list_postmortems(
+        self,
+        workspace_id: str,
+        *,
+        incident_id: str | None = None,
+        status: str | None = None,
+    ) -> list[PostmortemSummary]:
+        with self.session_factory() as session:
+            stmt = (
+                select(PostmortemRow)
+                .join(IncidentRow, PostmortemRow.incident_id == IncidentRow.incident_id)
+                .where(IncidentRow.ops_workspace_id == workspace_id)
+            )
+            if incident_id is not None:
+                stmt = stmt.where(PostmortemRow.incident_id == incident_id)
+            if status is not None:
+                stmt = stmt.where(PostmortemRow.status == status)
+            rows = session.scalars(stmt.order_by(PostmortemRow.updated_at.desc())).all()
+            return [self._to_postmortem(row) for row in rows]
 
     def start_replay_run(self, command: ReplayRunCommand) -> ReplayRunSummary:
         replay_run_id = f"replay-{uuid4().hex[:8]}"

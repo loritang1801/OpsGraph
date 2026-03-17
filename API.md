@@ -564,6 +564,24 @@ Response:
 }
 ```
 
+### 5.12.1 `GET /api/v1/opsgraph/postmortems`
+
+Purpose: list postmortem drafts/finals for one workspace with optional incident and status filters.
+
+Auth: `viewer`
+
+Query params:
+
+- `workspace_id`
+- `incident_id`
+- `status`
+- `cursor`
+- `limit`
+
+Response:
+
+- `200 OK` with paginated `PostmortemSummary[]`
+
 ### 5.13 `GET /api/v1/opsgraph/replay-cases`
 
 Purpose: list replay cases created from retrospective or curated replay snapshots.

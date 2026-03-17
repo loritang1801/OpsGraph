@@ -497,6 +497,19 @@ class OpsGraphAppService:
     def get_postmortem(self, incident_id: str) -> PostmortemSummary:
         return self.repository.get_postmortem(incident_id)
 
+    def list_postmortems(
+        self,
+        workspace_id: str,
+        *,
+        incident_id: str | None = None,
+        status: str | None = None,
+    ) -> list[PostmortemSummary]:
+        return self.repository.list_postmortems(
+            workspace_id,
+            incident_id=incident_id,
+            status=status,
+        )
+
     def start_replay_run(
         self,
         command: ReplayRunCommand | dict[str, Any],

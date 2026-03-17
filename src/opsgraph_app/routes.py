@@ -624,6 +624,28 @@ def create_fastapi_app(service: OpsGraphAppService):
             request_id=request_id,
         )
 
+    @app.get("/api/v1/opsgraph/postmortems")
+    def list_postmortems(
+        workspace_id: str,
+        incident_id: str | None = None,
+        status: str | None = None,
+        cursor: str | None = None,
+        limit: int = DEFAULT_PAGE_LIMIT,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    ) -> dict[str, object]:
+        items = service.list_postmortems(
+            workspace_id,
+            incident_id=incident_id,
+            status=status,
+        )
+        page_items, next_cursor, has_more = paginate_collection(items, cursor=cursor, limit=limit)
+        return success_envelope(
+            page_items,
+            request_id=request_id,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
+
     @app.get("/api/v1/opsgraph/replay-cases")
     def list_replay_cases(
         workspace_id: str,
