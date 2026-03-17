@@ -25,6 +25,7 @@
 - Implemented product APIs now include facts, hypothesis decisions, recommendation decisions, severity override, comms publish, resolve/close, postmortem lookup, replay submission, and replay status progression
 - Recommendation approval now bridges through a persisted approval-task row linked to recommendation state
 - Approval tasks can now be listed per incident and fetched directly for operator workbench/read-side integrations
+- Incident workspace reads now include approval tasks alongside recommendations, comms drafts, and timeline data
 - Recommendation execution now enforces tighter terminal-state and approval-task conflict rules
 - Comms publish now rejects stale fact-set drafts and requires the bound approved approval task when present
 - Comms draft listing now supports `channel` and `status` filters and exposes approval-task linkage plus created timestamps

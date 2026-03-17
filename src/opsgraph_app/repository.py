@@ -709,6 +709,11 @@ class SqlAlchemyOpsGraphRepository:
                 .where(RecommendationRow.incident_id == incident_id)
                 .order_by(RecommendationRow.recommendation_id.asc())
             ).all()
+            approval_rows = session.scalars(
+                select(ApprovalTaskRow)
+                .where(ApprovalTaskRow.incident_id == incident_id)
+                .order_by(ApprovalTaskRow.created_at.asc())
+            ).all()
             comms_rows = session.scalars(
                 select(CommsDraftRow)
                 .where(CommsDraftRow.incident_id == incident_id)
@@ -724,6 +729,7 @@ class SqlAlchemyOpsGraphRepository:
                 confirmed_facts=[self._to_fact(row) for row in fact_rows],
                 hypotheses=[self._to_hypothesis(row) for row in hypothesis_rows],
                 recommendations=[self._to_recommendation(row) for row in recommendation_rows],
+                approval_tasks=[self._to_approval_task(row) for row in approval_rows],
                 comms_drafts=[self._to_comms(row) for row in comms_rows],
                 timeline=[self._to_timeline(row) for row in timeline_rows],
             )

@@ -85,6 +85,8 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(replay_updated.status, "completed")
         self.assertGreaterEqual(len(replays), 1)
         self.assertEqual(len(workspace.hypotheses), 1)
+        self.assertEqual(len(workspace.approval_tasks), 1)
+        self.assertEqual(workspace.approval_tasks[0].approval_task_id, "approval-task-1")
         self.assertEqual(workspace.recommendations[0].approval_task_id, "approval-task-1")
 
     def test_get_approval_task_returns_linked_task(self) -> None:

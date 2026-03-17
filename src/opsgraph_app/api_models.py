@@ -196,6 +196,7 @@ class IncidentWorkspaceResponse(OpsGraphModel):
     confirmed_facts: list[FactSummary] = Field(default_factory=list)
     hypotheses: list[HypothesisSummary] = Field(default_factory=list)
     recommendations: list[RecommendationSummary] = Field(default_factory=list)
+    approval_tasks: list[ApprovalTaskSummary] = Field(default_factory=list)
     comms_drafts: list[CommsDraftSummary] = Field(default_factory=list)
     timeline: list[TimelineEventSummary] = Field(default_factory=list)
 
