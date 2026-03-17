@@ -21,6 +21,25 @@ def incident_response_payload() -> dict:
     }
 
 
+def replay_case_payload(*, replay_case_id: str) -> dict:
+    payload = incident_response_payload()
+    payload["incident_id"] = f"replay-case:{replay_case_id}"
+    payload["ops_workspace_id"] = "ops-ws-1"
+    payload["signal_ids"] = [f"signal-replay-{replay_case_id}"]
+    payload["signal_summaries"] = [
+        {
+            "signal_id": f"signal-replay-{replay_case_id}",
+            "source": "replay_case",
+            "correlation_key": f"replay-case:{replay_case_id}",
+            "summary": f"Replay case {replay_case_id} seeded incident response inputs.",
+            "observed_at": "2026-03-16T09:00:00Z",
+        }
+    ]
+    payload["current_incident_candidates"] = []
+    payload["context_bundle_id"] = f"replay-case-context-{replay_case_id}"
+    return payload
+
+
 def retrospective_payload() -> dict:
     return {
         "incident_id": "incident-1",
@@ -179,6 +198,14 @@ def replay_run_command(*, incident_id: str = "incident-1", model_bundle_version:
     return {
         "incident_id": incident_id,
         "replay_case_id": None,
+        "model_bundle_version": model_bundle_version,
+    }
+
+
+def replay_case_run_command(*, replay_case_id: str = "replay-case-1", model_bundle_version: str = "opsgraph-v1.2") -> dict:
+    return {
+        "incident_id": None,
+        "replay_case_id": replay_case_id,
         "model_bundle_version": model_bundle_version,
     }
 

@@ -23,6 +23,7 @@ from opsgraph_app.sample_payloads import (
     incident_response_command,
     replay_baseline_capture_command,
     replay_evaluation_command,
+    replay_case_run_command,
     recommendation_decision_command,
     replay_status_command,
     replay_run_command,
@@ -187,6 +188,19 @@ class OpsGraphServiceTests(unittest.TestCase):
 
         self.assertEqual(executed.status, "completed")
         self.assertIsNotNone(executed.workflow_run_id)
+        self.assertEqual(executed.current_state, "resolve")
+        self.assertEqual(state.current_state, "resolve")
+
+    def test_execute_replay_case_run_marks_completed(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        replay = service.start_replay_run(replay_case_run_command(replay_case_id="checkout-latency-regression"))
+        executed = service.execute_replay_run(replay.replay_run_id)
+        state = service.get_workflow_state(executed.workflow_run_id)
+
+        self.assertEqual(replay.replay_case_id, "checkout-latency-regression")
+        self.assertEqual(executed.status, "completed")
         self.assertEqual(executed.current_state, "resolve")
         self.assertEqual(state.current_state, "resolve")
 

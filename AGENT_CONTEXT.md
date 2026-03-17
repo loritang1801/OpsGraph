@@ -27,6 +27,7 @@
 - Recommendation execution now enforces tighter terminal-state and approval-task conflict rules
 - Comms publish now rejects stale fact-set drafts and requires the bound approved approval task when present
 - Resolve/close transitions now enforce root-cause fact presence and resolved-before-close invariants
+- Replay runs now execute both incident-backed and replay-case-backed requests through the shared workflow replay path
 - Replay runs can now seed file-backed replay fixtures under `replay_fixtures/`, execute the shared `opsgraph_incident_response` workflow through `ReplayFixtureLoader`, and persist workflow run linkage/current state back to the replay row
 - Replay baseline capture and evaluation reporting are now implemented end-to-end, with baseline/replay report persistence, node-level diffs, latency deltas, and JSON/Markdown artifacts under `replay_reports/`
 - `scripts/run_replay_report.py` now runs local baseline capture -> replay -> compare and emits artifact paths in the returned report payload
@@ -44,8 +45,8 @@
 
 1. Expand replay evaluation from report generation into richer comparison metrics and artifact export coverage
 2. Add recommendation approval execution and comms orchestration beyond current state mutation flow
-3. Add replay-case execution beyond the current workflow-run path
-4. Add broader failure-path coverage for replay execution, route-level error mapping, and approval orchestration
+3. Add broader failure-path coverage for replay execution, route-level error mapping, and approval orchestration
+4. Persist first-class replay-case records instead of relying on replay-run-only linkage
 
 ## Local Note
 
