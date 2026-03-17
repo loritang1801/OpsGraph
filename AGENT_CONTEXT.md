@@ -24,6 +24,7 @@
 - `app.py` exposes a FastAPI factory over the shared workflow API
 - Implemented product APIs now include facts, hypothesis decisions, recommendation decisions, severity override, comms publish, resolve/close, postmortem lookup, replay submission, and replay status progression
 - Incident list queries now support `status`, `severity`, and `service_id` filters at the product layer
+- Incident, signal, fact, recommendation, and comms resource models now serialize with contract-aligned id/status/service/channel aliases, and incident reads now expose `acknowledged_at`
 - Recommendation approval now bridges through a persisted approval-task row linked to recommendation state
 - Approval tasks can now be listed per incident and fetched directly for operator workbench/read-side integrations
 - Incident workspace reads now include persisted signals and approval tasks alongside recommendations, comms drafts, and timeline data
@@ -39,6 +40,7 @@
 - Replay evaluation now raises stable domain codes for not-executed runs and unavailable runtime dependencies
 - Incident execution seeds now include persisted signal ids and summaries instead of empty signal placeholders
 - Alert and replay submission routes now return `202 Accepted`, `routes.py` contains explicit domain-error-to-HTTP mapping logic for product APIs, and a Grafana webhook alias now lands on the same ingest flow
+- Alert ingest responses now also surface accepted-signal counts plus synthetic workflow-run linkage for the queued enrichment path
 - Replay runs can now seed file-backed replay fixtures under `replay_fixtures/`, execute the shared `opsgraph_incident_response` workflow through `ReplayFixtureLoader`, and persist workflow run linkage/current state back to the replay row
 - Replay baseline capture and evaluation reporting are now implemented end-to-end, with baseline/replay report persistence, node-level diffs, derived mismatch metrics, latency deltas, and JSON/Markdown artifacts under `replay_reports/`
 - `scripts/run_replay_report.py` now runs local baseline capture -> replay -> compare and emits artifact paths in the returned report payload

@@ -53,6 +53,25 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertFalse(ingest.incident_created)
         self.assertEqual(len(workspace_after.signals), 2)
         self.assertTrue(any(item.signal_id == ingest.signal_id for item in workspace_after.signals))
+        self.assertEqual(ingest.accepted_signals, 1)
+        self.assertIsNotNone(ingest.workflow_run_id)
+
+    def test_incident_workspace_contract_fields_serialize_with_aliases(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        workspace = service.get_incident_workspace("incident-1")
+        workspace_payload = workspace.model_dump(by_alias=True)
+        incident_payload = workspace.incident.model_dump(by_alias=True)
+        signal_payload = workspace.signals[0].model_dump(by_alias=True)
+
+        self.assertEqual(incident_payload["id"], "incident-1")
+        self.assertEqual(incident_payload["status"], "investigating")
+        self.assertEqual(incident_payload["service_id"], "checkout-api")
+        self.assertIsNotNone(incident_payload["acknowledged_at"])
+        self.assertEqual(signal_payload["id"], "signal-1")
+        self.assertIn("facts", workspace_payload)
+        self.assertEqual(workspace_payload["facts"][0]["id"], "fact-1")
 
     def test_list_incidents_supports_status_severity_and_service_filters(self) -> None:
         service = build_app_service()

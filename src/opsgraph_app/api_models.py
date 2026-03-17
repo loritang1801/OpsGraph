@@ -11,7 +11,7 @@ class OpsGraphModel(BaseModel):
 
 
 class FactSummary(OpsGraphModel):
-    fact_id: str
+    fact_id: str = Field(serialization_alias="id")
     fact_type: str
     status: str
     statement: str
@@ -21,20 +21,21 @@ class FactSummary(OpsGraphModel):
 
 
 class IncidentSummary(OpsGraphModel):
-    incident_id: str
+    incident_id: str = Field(serialization_alias="id")
     incident_key: str
     title: str
     severity: str
-    incident_status: str
-    service_name: str
+    incident_status: str = Field(serialization_alias="status")
+    service_name: str = Field(serialization_alias="service_id")
     opened_at: datetime
+    acknowledged_at: datetime | None = None
     current_fact_set_version: int
     latest_workflow_run_id: str | None = None
     updated_at: datetime | None = None
 
 
 class HypothesisSummary(OpsGraphModel):
-    hypothesis_id: str
+    hypothesis_id: str = Field(serialization_alias="id")
     status: str
     rank: int
     confidence: float | None = None
@@ -45,17 +46,18 @@ class HypothesisSummary(OpsGraphModel):
 
 
 class RecommendationSummary(OpsGraphModel):
-    recommendation_id: str
+    recommendation_id: str = Field(serialization_alias="id")
+    recommendation_type: str = "mitigate"
     title: str
     risk_level: str
-    approval_required: bool
+    approval_required: bool = Field(serialization_alias="requires_approval")
     status: str
     hypothesis_id: str | None = None
     approval_task_id: str | None = None
 
 
 class ApprovalTaskSummary(OpsGraphModel):
-    approval_task_id: str
+    approval_task_id: str = Field(serialization_alias="id")
     incident_id: str
     recommendation_id: str | None = None
     status: str
@@ -65,8 +67,8 @@ class ApprovalTaskSummary(OpsGraphModel):
 
 
 class CommsDraftSummary(OpsGraphModel):
-    draft_id: str
-    channel: str
+    draft_id: str = Field(serialization_alias="id")
+    channel: str = Field(serialization_alias="channel_type")
     title: str
     status: str
     fact_set_version: int
@@ -76,14 +78,14 @@ class CommsDraftSummary(OpsGraphModel):
 
 
 class TimelineEventSummary(OpsGraphModel):
-    event_id: str
+    event_id: str = Field(serialization_alias="id")
     kind: str
     summary: str
     created_at: datetime
 
 
 class PostmortemSummary(OpsGraphModel):
-    postmortem_id: str
+    postmortem_id: str = Field(serialization_alias="id")
     incident_id: str
     status: str
     fact_set_version: int
@@ -93,7 +95,7 @@ class PostmortemSummary(OpsGraphModel):
 
 
 class ReplayRunSummary(OpsGraphModel):
-    replay_run_id: str
+    replay_run_id: str = Field(serialization_alias="id")
     incident_id: str
     status: str
     model_bundle_version: str
@@ -105,7 +107,7 @@ class ReplayRunSummary(OpsGraphModel):
 
 
 class ReplayCaseSummary(OpsGraphModel):
-    replay_case_id: str
+    replay_case_id: str = Field(serialization_alias="id")
     incident_id: str
     workflow_type: str
     subject_type: str
@@ -192,7 +194,7 @@ class ReplayEvaluationSummary(OpsGraphModel):
 
 
 class SignalSummary(OpsGraphModel):
-    signal_id: str
+    signal_id: str = Field(serialization_alias="id")
     source: str
     status: str
     title: str
@@ -203,7 +205,7 @@ class SignalSummary(OpsGraphModel):
 class IncidentWorkspaceResponse(OpsGraphModel):
     incident: IncidentSummary
     signals: list[SignalSummary] = Field(default_factory=list)
-    confirmed_facts: list[FactSummary] = Field(default_factory=list)
+    confirmed_facts: list[FactSummary] = Field(default_factory=list, serialization_alias="facts")
     hypotheses: list[HypothesisSummary] = Field(default_factory=list)
     recommendations: list[RecommendationSummary] = Field(default_factory=list)
     approval_tasks: list[ApprovalTaskSummary] = Field(default_factory=list)
@@ -225,6 +227,8 @@ class AlertIngestResponse(OpsGraphModel):
     signal_id: str
     incident_id: str
     incident_created: bool
+    accepted_signals: int = 1
+    workflow_run_id: str | None = None
 
 
 class FactCreateCommand(OpsGraphModel):

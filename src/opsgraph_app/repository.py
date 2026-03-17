@@ -217,6 +217,7 @@ class IncidentRow(Base):
     incident_status: Mapped[str] = mapped_column(String(50))
     service_name: Mapped[str] = mapped_column(String(100))
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     current_fact_set_version: Mapped[int] = mapped_column(Integer, default=1)
     latest_workflow_run_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
@@ -444,6 +445,7 @@ class SqlAlchemyOpsGraphRepository:
                     incident_status="investigating",
                     service_name="checkout-api",
                     opened_at=created_at,
+                    acknowledged_at=datetime(2026, 3, 16, 9, 1, tzinfo=UTC),
                     current_fact_set_version=1,
                     latest_workflow_run_id=None,
                     updated_at=created_at,
@@ -548,6 +550,7 @@ class SqlAlchemyOpsGraphRepository:
             incident_status=row.incident_status,
             service_name=row.service_name,
             opened_at=row.opened_at,
+            acknowledged_at=row.acknowledged_at,
             current_fact_set_version=row.current_fact_set_version,
             latest_workflow_run_id=row.latest_workflow_run_id,
             updated_at=row.updated_at,
@@ -872,6 +875,7 @@ class SqlAlchemyOpsGraphRepository:
         source: str,
     ) -> AlertIngestResponse:
         signal_id = f"signal-{uuid4().hex[:8]}"
+        workflow_run_id = f"opsgraph-alert-{signal_id}"
         with self.session_factory.begin() as session:
             signal_row = session.get(SignalIndexRow, correlation_key)
             incident_created = False
@@ -888,8 +892,9 @@ class SqlAlchemyOpsGraphRepository:
                         incident_status="investigating",
                         service_name=correlation_key.split(":")[0],
                         opened_at=observed_at,
+                        acknowledged_at=observed_at,
                         current_fact_set_version=1,
-                        latest_workflow_run_id=None,
+                        latest_workflow_run_id=workflow_run_id,
                         updated_at=self._normalize_timestamp(observed_at),
                     )
                 )
@@ -899,6 +904,9 @@ class SqlAlchemyOpsGraphRepository:
                 incident_row = session.get(IncidentRow, incident_id)
                 if incident_row is not None:
                     incident_row.updated_at = self._normalize_timestamp(observed_at)  # type: ignore[assignment]
+                    incident_row.latest_workflow_run_id = workflow_run_id
+                    if incident_row.acknowledged_at is None:
+                        incident_row.acknowledged_at = observed_at
             session.add(
                 SignalRow(
                     signal_id=signal_id,
@@ -919,7 +927,13 @@ class SqlAlchemyOpsGraphRepository:
                     created_at=observed_at,
                 )
             )
-        return AlertIngestResponse(signal_id=signal_id, incident_id=incident_id, incident_created=incident_created)
+        return AlertIngestResponse(
+            signal_id=signal_id,
+            incident_id=incident_id,
+            incident_created=incident_created,
+            accepted_signals=1,
+            workflow_run_id=workflow_run_id,
+        )
 
     def add_fact(self, incident_id: str, command: FactCreateCommand) -> FactMutationResponse:
         with self.session_factory.begin() as session:
