@@ -23,6 +23,7 @@
 - `sample_payloads.py` includes demo payload and request helpers
 - `app.py` exposes a FastAPI factory over the shared workflow API
 - Implemented product APIs now include facts, hypothesis decisions, recommendation decisions, severity override, comms publish, resolve/close, postmortem lookup, replay submission, and replay status progression
+- Incident list queries now support `status`, `severity`, and `service_id` filters at the product layer
 - Recommendation approval now bridges through a persisted approval-task row linked to recommendation state
 - Approval tasks can now be listed per incident and fetched directly for operator workbench/read-side integrations
 - Incident workspace reads now include approval tasks alongside recommendations, comms drafts, and timeline data
@@ -33,10 +34,10 @@
 - Replay runs now execute both incident-backed and replay-case-backed requests through the shared workflow replay path
 - Retrospective completion now persists a replay-case snapshot tied back to the postmortem row
 - Replay cases can now be listed and fetched directly from product APIs for postmortem-to-replay navigation
-- Replay run listing can now also be filtered by `replay_case_id` for postmortem-specific replay tracking
+- Replay run listing can now also be filtered by `replay_case_id` and `status` for postmortem-specific replay tracking
 - Replay evaluation reports can now also be filtered by `replay_case_id` for postmortem-specific comparison views
 - Replay evaluation now raises stable domain codes for not-executed runs and unavailable runtime dependencies
-- `routes.py` now contains explicit domain-error-to-HTTP mapping logic for product APIs
+- Alert and replay submission routes now return `202 Accepted`, `routes.py` contains explicit domain-error-to-HTTP mapping logic for product APIs, and a Grafana webhook alias now lands on the same ingest flow
 - Replay runs can now seed file-backed replay fixtures under `replay_fixtures/`, execute the shared `opsgraph_incident_response` workflow through `ReplayFixtureLoader`, and persist workflow run linkage/current state back to the replay row
 - Replay baseline capture and evaluation reporting are now implemented end-to-end, with baseline/replay report persistence, node-level diffs, derived mismatch metrics, latency deltas, and JSON/Markdown artifacts under `replay_reports/`
 - `scripts/run_replay_report.py` now runs local baseline capture -> replay -> compare and emits artifact paths in the returned report payload

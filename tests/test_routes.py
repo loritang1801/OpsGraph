@@ -25,6 +25,15 @@ class OpsGraphRouteErrorMappingTests(unittest.TestCase):
         self.assertEqual(status_code, 409)
         self.assertEqual(payload["error"]["code"], "APPROVAL_REQUIRED")
 
+    def test_maps_fact_version_conflict_to_409(self) -> None:
+        status_code, payload = map_domain_error(
+            ValueError("FACT_VERSION_CONFLICT"),
+            path="/api/v1/opsgraph/incidents/incident-1/facts",
+        )
+
+        self.assertEqual(status_code, 409)
+        self.assertEqual(payload["error"]["code"], "FACT_VERSION_CONFLICT")
+
     def test_maps_validation_value_error_to_422(self) -> None:
         status_code, payload = map_domain_error(ValueError("ROOT_CAUSE_FACT_REQUIRED"), path="/api/v1/opsgraph/incidents/incident-1/resolve")
 

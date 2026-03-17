@@ -45,7 +45,14 @@ from .api_models import (
 
 
 class OpsGraphRepository(Protocol):
-    def list_incidents(self, workspace_id: str) -> list[IncidentSummary]: ...
+    def list_incidents(
+        self,
+        workspace_id: str,
+        *,
+        status: str | None = None,
+        severity: str | None = None,
+        service_id: str | None = None,
+    ) -> list[IncidentSummary]: ...
 
     def get_incident_workspace(self, incident_id: str) -> IncidentWorkspaceResponse: ...
 
@@ -115,6 +122,7 @@ class OpsGraphRepository(Protocol):
         workspace_id: str,
         incident_id: str | None = None,
         replay_case_id: str | None = None,
+        status: str | None = None,
     ) -> list[ReplayRunSummary]: ...
 
     def list_replay_cases(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayCaseSummary]: ...
@@ -679,13 +687,27 @@ class SqlAlchemyOpsGraphRepository:
             created_at=row.created_at,
         )
 
-    def list_incidents(self, workspace_id: str) -> list[IncidentSummary]:
+    def list_incidents(
+        self,
+        workspace_id: str,
+        *,
+        status: str | None = None,
+        severity: str | None = None,
+        service_id: str | None = None,
+    ) -> list[IncidentSummary]:
         with self.session_factory() as session:
-            rows = session.scalars(
+            stmt = (
                 select(IncidentRow)
                 .where(IncidentRow.ops_workspace_id == workspace_id)
                 .order_by(IncidentRow.opened_at.desc())
-            ).all()
+            )
+            if status is not None:
+                stmt = stmt.where(IncidentRow.incident_status == status)
+            if severity is not None:
+                stmt = stmt.where(IncidentRow.severity == severity)
+            if service_id is not None:
+                stmt = stmt.where(IncidentRow.service_name == service_id)
+            rows = session.scalars(stmt).all()
             return [self._to_incident(row) for row in rows]
 
     def get_incident_workspace(self, incident_id: str) -> IncidentWorkspaceResponse:
@@ -841,7 +863,7 @@ class SqlAlchemyOpsGraphRepository:
             if incident_row is None:
                 raise KeyError(incident_id)
             if incident_row.current_fact_set_version != command.expected_fact_set_version:
-                raise ValueError("FACT_SET_CONFLICT")
+                raise ValueError("FACT_VERSION_CONFLICT")
             incident_row.current_fact_set_version += 1
             incident_row.updated_at = self._utcnow_naive()
             fact_id = f"fact-{uuid4().hex[:8]}"
@@ -879,7 +901,7 @@ class SqlAlchemyOpsGraphRepository:
             if incident_row is None or fact_row is None or fact_row.incident_id != incident_id:
                 raise KeyError(fact_id)
             if incident_row.current_fact_set_version != command.expected_fact_set_version:
-                raise ValueError("FACT_SET_CONFLICT")
+                raise ValueError("FACT_VERSION_CONFLICT")
             incident_row.current_fact_set_version += 1
             incident_row.updated_at = self._utcnow_naive()
             fact_row.status = "retracted"
@@ -1209,6 +1231,7 @@ class SqlAlchemyOpsGraphRepository:
         workspace_id: str,
         incident_id: str | None = None,
         replay_case_id: str | None = None,
+        status: str | None = None,
     ) -> list[ReplayRunSummary]:
         with self.session_factory() as session:
             stmt = select(ReplayRunRow).where(ReplayRunRow.ops_workspace_id == workspace_id)
@@ -1216,6 +1239,8 @@ class SqlAlchemyOpsGraphRepository:
                 stmt = stmt.where(ReplayRunRow.incident_id == incident_id)
             if replay_case_id is not None:
                 stmt = stmt.where(ReplayRunRow.replay_case_id == replay_case_id)
+            if status is not None:
+                stmt = stmt.where(ReplayRunRow.status == status)
             rows = session.scalars(stmt.order_by(ReplayRunRow.created_at.desc())).all()
             return [self._to_replay(row) for row in rows]
 

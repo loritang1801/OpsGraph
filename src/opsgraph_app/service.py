@@ -81,8 +81,20 @@ class OpsGraphAppService:
     def list_workflows(self):
         return self.workflow_api_service.list_workflows()
 
-    def list_incidents(self, workspace_id: str) -> list[IncidentSummary]:
-        return self.repository.list_incidents(workspace_id)
+    def list_incidents(
+        self,
+        workspace_id: str,
+        *,
+        status: str | None = None,
+        severity: str | None = None,
+        service_id: str | None = None,
+    ) -> list[IncidentSummary]:
+        return self.repository.list_incidents(
+            workspace_id,
+            status=status,
+            severity=severity,
+            service_id=service_id,
+        )
 
     def get_incident_workspace(self, incident_id: str) -> IncidentWorkspaceResponse:
         return self.repository.get_incident_workspace(incident_id)
@@ -197,11 +209,13 @@ class OpsGraphAppService:
         workspace_id: str,
         incident_id: str | None = None,
         replay_case_id: str | None = None,
+        status: str | None = None,
     ) -> list[ReplayRunSummary]:
         return self.repository.list_replays(
             workspace_id,
             incident_id,
             replay_case_id,
+            status,
         )
 
     def list_replay_cases(

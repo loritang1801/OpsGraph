@@ -49,6 +49,39 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(ingest.incident_id, "incident-1")
         self.assertFalse(ingest.incident_created)
 
+    def test_list_incidents_supports_status_severity_and_service_filters(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        created = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="payments-api:latency-spike",
+                summary="Payments API latency spike",
+            )
+        )
+        service.override_severity("incident-1", severity_override_command(severity="sev1"))
+        service.resolve_incident("incident-1", resolve_incident_command())
+
+        resolved = service.list_incidents("ops-ws-1", status="resolved")
+        investigating = service.list_incidents("ops-ws-1", status="investigating")
+        sev1 = service.list_incidents("ops-ws-1", severity="sev1")
+        payments = service.list_incidents("ops-ws-1", service_id="payments-api")
+
+        self.assertEqual([item.incident_id for item in resolved], ["incident-1"])
+        self.assertEqual([item.incident_id for item in investigating], [created.incident_id])
+        self.assertEqual([item.incident_id for item in sev1], ["incident-1"])
+        self.assertEqual([item.incident_id for item in payments], [created.incident_id])
+
+    def test_add_fact_uses_contract_conflict_code_for_stale_fact_set(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        with self.assertRaisesRegex(ValueError, "FACT_VERSION_CONFLICT"):
+            service.add_fact(
+                "incident-1",
+                fact_create_command() | {"expected_fact_set_version": 2},
+            )
+
     def test_fact_hypothesis_recommendation_comms_and_replay_mutations(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
@@ -365,6 +398,21 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(filtered[0].replay_run_id, replay.replay_run_id)
         self.assertEqual(filtered[0].replay_case_id, postmortem.replay_case_id)
         self.assertEqual(unrelated, [])
+
+    def test_list_replays_can_filter_by_status(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        queued = service.start_replay_run(replay_run_command(model_bundle_version="opsgraph-v1.3"))
+        completed = service.start_replay_run(replay_run_command(model_bundle_version="opsgraph-v1.4"))
+        service.update_replay_status(completed.replay_run_id, replay_status_command())
+
+        queued_runs = service.list_replays("ops-ws-1", status="queued")
+        completed_runs = service.list_replays("ops-ws-1", status="completed")
+
+        self.assertTrue(any(item.replay_run_id == queued.replay_run_id for item in queued_runs))
+        self.assertFalse(any(item.replay_run_id == queued.replay_run_id for item in completed_runs))
+        self.assertTrue(any(item.replay_run_id == completed.replay_run_id for item in completed_runs))
 
     def test_list_replay_reports_can_filter_by_replay_case_id(self) -> None:
         service = build_app_service()

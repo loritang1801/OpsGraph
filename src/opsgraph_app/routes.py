@@ -106,13 +106,29 @@ def create_fastapi_app(service: OpsGraphAppService):
     def get_workflow_state(workflow_run_id: str) -> OpsGraphWorkflowStateResponse:
         return service.get_workflow_state(workflow_run_id)
 
-    @app.post("/api/v1/opsgraph/alerts/prometheus", response_model=AlertIngestResponse)
+    @app.post("/api/v1/opsgraph/alerts/prometheus", response_model=AlertIngestResponse, status_code=202)
     def ingest_prometheus_alert(command: AlertIngestCommand) -> AlertIngestResponse:
         return service.ingest_alert(command)
 
-    @app.get("/api/v1/opsgraph/incidents")
-    def list_incidents(workspace_id: str):
-        return service.list_incidents(workspace_id)
+    @app.post("/api/v1/opsgraph/alerts/grafana", response_model=AlertIngestResponse, status_code=202)
+    def ingest_grafana_alert(command: AlertIngestCommand) -> AlertIngestResponse:
+        payload = command.model_dump()
+        payload["source"] = "grafana"
+        return service.ingest_alert(payload)
+
+    @app.get("/api/v1/opsgraph/incidents", response_model=list[IncidentSummary])
+    def list_incidents(
+        workspace_id: str,
+        status: str | None = None,
+        severity: str | None = None,
+        service_id: str | None = None,
+    ) -> list[IncidentSummary]:
+        return service.list_incidents(
+            workspace_id,
+            status=status,
+            severity=severity,
+            service_id=service_id,
+        )
 
     @app.get("/api/v1/opsgraph/incidents/{incident_id}", response_model=IncidentWorkspaceResponse)
     def get_incident_workspace(incident_id: str) -> IncidentWorkspaceResponse:
@@ -215,17 +231,18 @@ def create_fastapi_app(service: OpsGraphAppService):
     def build_retrospective(command: RetrospectiveCommand) -> OpsGraphRunResponse:
         return service.build_retrospective(command)
 
-    @app.post("/api/v1/opsgraph/replays/run", response_model=ReplayRunSummary)
+    @app.post("/api/v1/opsgraph/replays/run", response_model=ReplayRunSummary, status_code=202)
     def start_replay_run(command: ReplayRunCommand) -> ReplayRunSummary:
         return service.start_replay_run(command)
 
-    @app.get("/api/v1/opsgraph/replays")
+    @app.get("/api/v1/opsgraph/replays", response_model=list[ReplayRunSummary])
     def list_replays(
         workspace_id: str,
         incident_id: str | None = None,
         replay_case_id: str | None = None,
+        status: str | None = None,
     ) -> list[ReplayRunSummary]:
-        return service.list_replays(workspace_id, incident_id, replay_case_id)
+        return service.list_replays(workspace_id, incident_id, replay_case_id, status)
 
     @app.get("/api/v1/opsgraph/replays/baselines")
     def list_replay_baselines(
