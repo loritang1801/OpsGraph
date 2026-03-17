@@ -26,7 +26,7 @@
 - Incident list queries now support `status`, `severity`, and `service_id` filters at the product layer
 - Recommendation approval now bridges through a persisted approval-task row linked to recommendation state
 - Approval tasks can now be listed per incident and fetched directly for operator workbench/read-side integrations
-- Incident workspace reads now include approval tasks alongside recommendations, comms drafts, and timeline data
+- Incident workspace reads now include persisted signals and approval tasks alongside recommendations, comms drafts, and timeline data
 - Recommendation execution now enforces tighter terminal-state and approval-task conflict rules
 - Comms publish now rejects stale fact-set drafts and requires the bound approved approval task when present
 - Comms draft listing now supports `channel` and `status` filters and exposes approval-task linkage plus created timestamps
@@ -37,6 +37,7 @@
 - Replay run listing can now also be filtered by `replay_case_id` and `status` for postmortem-specific replay tracking
 - Replay evaluation reports can now also be filtered by `replay_case_id` for postmortem-specific comparison views
 - Replay evaluation now raises stable domain codes for not-executed runs and unavailable runtime dependencies
+- Incident execution seeds now include persisted signal ids and summaries instead of empty signal placeholders
 - Alert and replay submission routes now return `202 Accepted`, `routes.py` contains explicit domain-error-to-HTTP mapping logic for product APIs, and a Grafana webhook alias now lands on the same ingest flow
 - Replay runs can now seed file-backed replay fixtures under `replay_fixtures/`, execute the shared `opsgraph_incident_response` workflow through `ReplayFixtureLoader`, and persist workflow run linkage/current state back to the replay row
 - Replay baseline capture and evaluation reporting are now implemented end-to-end, with baseline/replay report persistence, node-level diffs, derived mismatch metrics, latency deltas, and JSON/Markdown artifacts under `replay_reports/`
