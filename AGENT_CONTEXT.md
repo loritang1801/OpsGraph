@@ -32,7 +32,7 @@
 - Replay cases can now be listed and fetched directly from product APIs for postmortem-to-replay navigation
 - `routes.py` now contains explicit domain-error-to-HTTP mapping logic for product APIs
 - Replay runs can now seed file-backed replay fixtures under `replay_fixtures/`, execute the shared `opsgraph_incident_response` workflow through `ReplayFixtureLoader`, and persist workflow run linkage/current state back to the replay row
-- Replay baseline capture and evaluation reporting are now implemented end-to-end, with baseline/replay report persistence, node-level diffs, latency deltas, and JSON/Markdown artifacts under `replay_reports/`
+- Replay baseline capture and evaluation reporting are now implemented end-to-end, with baseline/replay report persistence, node-level diffs, derived mismatch metrics, latency deltas, and JSON/Markdown artifacts under `replay_reports/`
 - `scripts/run_replay_report.py` now runs local baseline capture -> replay -> compare and emits artifact paths in the returned report payload
 - Shared runtime foundation lives in `D:\project\SharedAgentCore`
 - Future OpsGraph code should consume vendored shared assets instead of re-implementing registries and runtime helpers

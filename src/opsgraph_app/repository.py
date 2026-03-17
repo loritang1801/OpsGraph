@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
@@ -617,6 +618,11 @@ class SqlAlchemyOpsGraphRepository:
 
     @staticmethod
     def _to_replay_evaluation(row: ReplayEvaluationRow) -> ReplayEvaluationSummary:
+        node_diffs = [ReplayNodeDiffSummary.model_validate(item) for item in row.node_diffs]
+        metrics = SqlAlchemyOpsGraphRepository._replay_evaluation_metrics(
+            node_diffs=node_diffs,
+            report_artifact_path=row.report_artifact_path,
+        )
         return ReplayEvaluationSummary(
             report_id=row.report_id,
             baseline_id=row.baseline_id,
@@ -625,13 +631,20 @@ class SqlAlchemyOpsGraphRepository:
             status=row.status,  # type: ignore[arg-type]
             score=row.score,
             mismatch_count=len(row.mismatches),
+            matched_node_count=metrics["matched_node_count"],
+            mismatched_node_count=metrics["mismatched_node_count"],
+            bundle_mismatch_count=metrics["bundle_mismatch_count"],
+            summary_mismatch_count=metrics["summary_mismatch_count"],
+            latency_regression_count=metrics["latency_regression_count"],
+            max_latency_delta_ms=metrics["max_latency_delta_ms"],
             mismatches=row.mismatches,
             baseline_final_state=row.baseline_final_state,
             replay_final_state=row.replay_final_state,
             baseline_checkpoint_seq=row.baseline_checkpoint_seq,
             replay_checkpoint_seq=row.replay_checkpoint_seq,
-            node_diffs=[ReplayNodeDiffSummary.model_validate(item) for item in row.node_diffs],
+            node_diffs=node_diffs,
             report_artifact_path=row.report_artifact_path,
+            markdown_report_path=metrics["markdown_report_path"],
             created_at=row.created_at,
         )
 
@@ -1238,9 +1251,14 @@ class SqlAlchemyOpsGraphRepository:
         replay_checkpoint_seq: int | None = None,
         node_diffs: list[ReplayNodeDiffSummary] | None = None,
         report_artifact_path: str | None = None,
-    ) -> ReplayEvaluationSummary:
+        ) -> ReplayEvaluationSummary:
         report_id = f"report-{uuid4().hex[:8]}"
         created_at = self._utcnow_naive()
+        node_diffs = node_diffs or []
+        metrics = self._replay_evaluation_metrics(
+            node_diffs=node_diffs,
+            report_artifact_path=report_artifact_path,
+        )
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
@@ -1259,7 +1277,7 @@ class SqlAlchemyOpsGraphRepository:
                     replay_final_state=replay_final_state,
                     baseline_checkpoint_seq=baseline_checkpoint_seq,
                     replay_checkpoint_seq=replay_checkpoint_seq,
-                    node_diffs=[item.model_dump() for item in (node_diffs or [])],
+                    node_diffs=[item.model_dump() for item in node_diffs],
                     report_artifact_path=report_artifact_path,
                     created_at=created_at,
                 )
@@ -1272,13 +1290,20 @@ class SqlAlchemyOpsGraphRepository:
             status=status,  # type: ignore[arg-type]
             score=score,
             mismatch_count=len(mismatches),
+            matched_node_count=metrics["matched_node_count"],
+            mismatched_node_count=metrics["mismatched_node_count"],
+            bundle_mismatch_count=metrics["bundle_mismatch_count"],
+            summary_mismatch_count=metrics["summary_mismatch_count"],
+            latency_regression_count=metrics["latency_regression_count"],
+            max_latency_delta_ms=metrics["max_latency_delta_ms"],
             mismatches=mismatches,
             baseline_final_state=baseline_final_state,
             replay_final_state=replay_final_state,
             baseline_checkpoint_seq=baseline_checkpoint_seq,
             replay_checkpoint_seq=replay_checkpoint_seq,
-            node_diffs=node_diffs or [],
+            node_diffs=node_diffs,
             report_artifact_path=report_artifact_path,
+            markdown_report_path=metrics["markdown_report_path"],
             created_at=created_at,
         )
 
@@ -1309,6 +1334,39 @@ class SqlAlchemyOpsGraphRepository:
                 raise KeyError(report_id)
             row.report_artifact_path = report_artifact_path
             return self._to_replay_evaluation(row)
+
+    @staticmethod
+    def _replay_evaluation_metrics(
+        *,
+        node_diffs: list[ReplayNodeDiffSummary],
+        report_artifact_path: str | None,
+    ) -> dict[str, object]:
+        matched_node_count = sum(1 for item in node_diffs if item.matched)
+        mismatched_node_count = sum(1 for item in node_diffs if not item.matched)
+        bundle_mismatch_count = sum(
+            1 for item in node_diffs if any("bundle mismatch" in reason for reason in item.mismatch_reasons)
+        )
+        summary_mismatch_count = sum(
+            1 for item in node_diffs if any("summary mismatch" in reason for reason in item.mismatch_reasons)
+        )
+        latency_regression_count = sum(
+            1 for item in node_diffs if item.latency_delta_ms is not None and item.latency_delta_ms > 0
+        )
+        latency_deltas = [item.latency_delta_ms for item in node_diffs if item.latency_delta_ms is not None]
+        markdown_report_path = (
+            str(Path(report_artifact_path).with_suffix(".md"))
+            if report_artifact_path is not None
+            else None
+        )
+        return {
+            "matched_node_count": matched_node_count,
+            "mismatched_node_count": mismatched_node_count,
+            "bundle_mismatch_count": bundle_mismatch_count,
+            "summary_mismatch_count": summary_mismatch_count,
+            "latency_regression_count": latency_regression_count,
+            "max_latency_delta_ms": max(latency_deltas) if latency_deltas else None,
+            "markdown_report_path": markdown_report_path,
+        }
 
     def update_replay_status(self, replay_run_id: str, command: ReplayStatusCommand) -> ReplayRunSummary:
         with self.session_factory.begin() as session:

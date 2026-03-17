@@ -162,6 +162,12 @@ class ReplayEvaluationSummary(OpsGraphModel):
     status: Literal["matched", "mismatched"]
     score: float
     mismatch_count: int
+    matched_node_count: int = 0
+    mismatched_node_count: int = 0
+    bundle_mismatch_count: int = 0
+    summary_mismatch_count: int = 0
+    latency_regression_count: int = 0
+    max_latency_delta_ms: int | None = None
     mismatches: list[str] = Field(default_factory=list)
     baseline_final_state: str | None = None
     replay_final_state: str | None = None
@@ -169,6 +175,7 @@ class ReplayEvaluationSummary(OpsGraphModel):
     replay_checkpoint_seq: int | None = None
     node_diffs: list[ReplayNodeDiffSummary] = Field(default_factory=list)
     report_artifact_path: str | None = None
+    markdown_report_path: str | None = None
     created_at: datetime
 
 
