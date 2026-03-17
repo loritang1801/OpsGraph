@@ -1,0 +1,1423 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Protocol
+from uuid import uuid4
+
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+from .api_models import (
+    AlertIngestResponse,
+    CommsDraftSummary,
+    CommsPublishCommand,
+    CommsPublishResponse,
+    FactCreateCommand,
+    FactMutationResponse,
+    FactRetractCommand,
+    FactSummary,
+    HypothesisDecisionCommand,
+    HypothesisDecisionResponse,
+    HypothesisSummary,
+    IncidentSummary,
+    IncidentWorkspaceResponse,
+    PostmortemSummary,
+    ReplayBaselineSummary,
+    ReplayEvaluationSummary,
+    ReplayNodeDiffSummary,
+    ReplayNodeSummary,
+    RecommendationDecisionCommand,
+    RecommendationDecisionResponse,
+    RecommendationSummary,
+    ReplayRunCommand,
+    ReplayStatusCommand,
+    ReplayRunSummary,
+    ResolveIncidentCommand,
+    CloseIncidentCommand,
+    SeverityOverrideCommand,
+    TimelineEventSummary,
+)
+
+
+class OpsGraphRepository(Protocol):
+    def list_incidents(self, workspace_id: str) -> list[IncidentSummary]: ...
+
+    def get_incident_workspace(self, incident_id: str) -> IncidentWorkspaceResponse: ...
+
+    def list_hypotheses(self, incident_id: str) -> list[HypothesisSummary]: ...
+
+    def list_recommendations(self, incident_id: str) -> list[RecommendationSummary]: ...
+
+    def list_comms(self, incident_id: str) -> list[CommsDraftSummary]: ...
+
+    def ingest_alert(
+        self,
+        *,
+        ops_workspace_id: str,
+        correlation_key: str,
+        summary: str,
+        observed_at: datetime,
+        source: str,
+    ) -> AlertIngestResponse: ...
+
+    def add_fact(self, incident_id: str, command: FactCreateCommand) -> FactMutationResponse: ...
+
+    def retract_fact(self, incident_id: str, fact_id: str, command: FactRetractCommand) -> FactMutationResponse: ...
+
+    def override_severity(self, incident_id: str, command: SeverityOverrideCommand) -> IncidentSummary: ...
+
+    def decide_hypothesis(
+        self,
+        incident_id: str,
+        hypothesis_id: str,
+        command: HypothesisDecisionCommand,
+    ) -> HypothesisDecisionResponse: ...
+
+    def decide_recommendation(
+        self,
+        incident_id: str,
+        recommendation_id: str,
+        command: RecommendationDecisionCommand,
+    ) -> RecommendationDecisionResponse: ...
+
+    def publish_comms(
+        self,
+        incident_id: str,
+        draft_id: str,
+        command: CommsPublishCommand,
+    ) -> CommsPublishResponse: ...
+
+    def resolve_incident(self, incident_id: str, command: ResolveIncidentCommand) -> IncidentSummary: ...
+
+    def close_incident(self, incident_id: str, command: CloseIncidentCommand) -> IncidentSummary: ...
+
+    def get_postmortem(self, incident_id: str) -> PostmortemSummary: ...
+
+    def start_replay_run(self, command: ReplayRunCommand) -> ReplayRunSummary: ...
+
+    def list_replays(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayRunSummary]: ...
+
+    def update_replay_status(self, replay_run_id: str, command: ReplayStatusCommand) -> ReplayRunSummary: ...
+
+    def get_replay_run(self, replay_run_id: str) -> ReplayRunSummary: ...
+
+    def mark_replay_execution(
+        self,
+        replay_run_id: str,
+        *,
+        status: str,
+        workflow_run_id: str | None = None,
+        current_state: str | None = None,
+        error_message: str | None = None,
+    ) -> ReplayRunSummary: ...
+
+    def get_incident_execution_seed(self, incident_id: str) -> dict[str, object]: ...
+
+    def record_replay_baseline(
+        self,
+        *,
+        incident_id: str,
+        workflow_run_id: str,
+        model_bundle_version: str,
+        workflow_type: str,
+        final_state: str,
+        checkpoint_seq: int,
+        node_summaries: list[ReplayNodeSummary],
+    ) -> ReplayBaselineSummary: ...
+
+    def list_replay_baselines(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayBaselineSummary]: ...
+
+    def get_replay_baseline(self, baseline_id: str) -> ReplayBaselineSummary: ...
+
+    def record_replay_evaluation(
+        self,
+        *,
+        baseline_id: str,
+        replay_run_id: str,
+        incident_id: str,
+        status: str,
+        score: float,
+        mismatches: list[str],
+        baseline_final_state: str | None = None,
+        replay_final_state: str | None = None,
+        baseline_checkpoint_seq: int | None = None,
+        replay_checkpoint_seq: int | None = None,
+        node_diffs: list[ReplayNodeDiffSummary] | None = None,
+        report_artifact_path: str | None = None,
+    ) -> ReplayEvaluationSummary: ...
+
+    def list_replay_evaluations(
+        self,
+        workspace_id: str,
+        incident_id: str | None = None,
+        replay_run_id: str | None = None,
+    ) -> list[ReplayEvaluationSummary]: ...
+
+    def attach_replay_evaluation_artifact(
+        self,
+        report_id: str,
+        *,
+        report_artifact_path: str,
+    ) -> ReplayEvaluationSummary: ...
+
+    def record_incident_response_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None: ...
+
+    def record_retrospective_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None: ...
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class IncidentRow(Base):
+    __tablename__ = "opsgraph_incident"
+
+    incident_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    ops_workspace_id: Mapped[str] = mapped_column(String(255), index=True)
+    incident_key: Mapped[str] = mapped_column(String(100), unique=True)
+    title: Mapped[str] = mapped_column(String(255))
+    severity: Mapped[str] = mapped_column(String(20))
+    incident_status: Mapped[str] = mapped_column(String(50))
+    service_name: Mapped[str] = mapped_column(String(100))
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    current_fact_set_version: Mapped[int] = mapped_column(Integer, default=1)
+    latest_workflow_run_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class IncidentFactRow(Base):
+    __tablename__ = "opsgraph_incident_fact"
+
+    fact_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    fact_type: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(50))
+    statement: Mapped[str] = mapped_column(Text)
+    fact_set_version: Mapped[int] = mapped_column(Integer)
+    source_refs: Mapped[list[dict]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class HypothesisRow(Base):
+    __tablename__ = "opsgraph_hypothesis"
+
+    hypothesis_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    status: Mapped[str] = mapped_column(String(50))
+    rank: Mapped[int] = mapped_column(Integer)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    title: Mapped[str] = mapped_column(String(255))
+    rationale: Mapped[str] = mapped_column(Text)
+    evidence_refs: Mapped[list[dict]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class RecommendationRow(Base):
+    __tablename__ = "opsgraph_recommendation"
+
+    recommendation_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    hypothesis_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    title: Mapped[str] = mapped_column(String(255))
+    risk_level: Mapped[str] = mapped_column(String(20))
+    approval_required: Mapped[bool] = mapped_column(Boolean)
+    status: Mapped[str] = mapped_column(String(50))
+    approval_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    instructions_markdown: Mapped[str] = mapped_column(Text, default="")
+    source_refs: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class ApprovalTaskRow(Base):
+    __tablename__ = "opsgraph_approval_task"
+
+    approval_task_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    recommendation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(50))
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class CommsDraftRow(Base):
+    __tablename__ = "opsgraph_comms_draft"
+
+    draft_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    channel: Mapped[str] = mapped_column(String(50))
+    title: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(50))
+    fact_set_version: Mapped[int] = mapped_column(Integer)
+    approval_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    published_message_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class TimelineEventRow(Base):
+    __tablename__ = "opsgraph_timeline_event"
+
+    event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    kind: Mapped[str] = mapped_column(String(50))
+    summary: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class SignalIndexRow(Base):
+    __tablename__ = "opsgraph_signal_index"
+
+    correlation_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+
+
+class PostmortemRow(Base):
+    __tablename__ = "opsgraph_postmortem"
+
+    postmortem_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True, unique=True)
+    status: Mapped[str] = mapped_column(String(50))
+    fact_set_version: Mapped[int] = mapped_column(Integer)
+    artifact_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class ReplayRunRow(Base):
+    __tablename__ = "opsgraph_replay_run"
+
+    replay_run_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    ops_workspace_id: Mapped[str] = mapped_column(String(255), index=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    replay_case_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(50))
+    model_bundle_version: Mapped[str] = mapped_column(String(100))
+    workflow_run_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    current_state: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class ReplayBaselineRow(Base):
+    __tablename__ = "opsgraph_replay_baseline"
+
+    baseline_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    ops_workspace_id: Mapped[str] = mapped_column(String(255), index=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    workflow_run_id: Mapped[str] = mapped_column(String(255), unique=True)
+    model_bundle_version: Mapped[str] = mapped_column(String(100))
+    workflow_type: Mapped[str] = mapped_column(String(100))
+    final_state: Mapped[str] = mapped_column(String(100))
+    checkpoint_seq: Mapped[int] = mapped_column(Integer)
+    node_summaries: Mapped[list[dict]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class ReplayEvaluationRow(Base):
+    __tablename__ = "opsgraph_replay_evaluation"
+
+    report_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    ops_workspace_id: Mapped[str] = mapped_column(String(255), index=True)
+    baseline_id: Mapped[str] = mapped_column(String(255), index=True)
+    replay_run_id: Mapped[str] = mapped_column(String(255), index=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    status: Mapped[str] = mapped_column(String(30))
+    score: Mapped[float] = mapped_column(Float)
+    mismatches: Mapped[list[str]] = mapped_column(JSON)
+    baseline_final_state: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    replay_final_state: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    baseline_checkpoint_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    replay_checkpoint_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    node_diffs: Mapped[list[dict]] = mapped_column(JSON)
+    report_artifact_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+def create_opsgraph_tables(engine: Engine) -> None:
+    Base.metadata.create_all(engine)
+
+
+class SqlAlchemyOpsGraphRepository:
+    def __init__(self, session_factory: sessionmaker[Session], engine: Engine) -> None:
+        self.session_factory = session_factory
+        self.engine = engine
+        create_opsgraph_tables(engine)
+        self.seed_if_empty()
+
+    @classmethod
+    def from_runtime_stores(cls, runtime_stores) -> "SqlAlchemyOpsGraphRepository":
+        return cls(runtime_stores.session_factory, runtime_stores.engine)
+
+    def seed_if_empty(self) -> None:
+        with self.session_factory.begin() as session:
+            existing = session.scalar(select(IncidentRow.incident_id).limit(1))
+            if existing is not None:
+                return
+            created_at = datetime(2026, 3, 16, 9, 0, tzinfo=UTC)
+            session.add(
+                IncidentRow(
+                    incident_id="incident-1",
+                    ops_workspace_id="ops-ws-1",
+                    incident_key="INC-2026-0001",
+                    title="Checkout API elevated 5xx rate",
+                    severity="sev2",
+                    incident_status="investigating",
+                    service_name="checkout-api",
+                    opened_at=created_at,
+                    current_fact_set_version=1,
+                    latest_workflow_run_id=None,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                IncidentFactRow(
+                    fact_id="fact-1",
+                    incident_id="incident-1",
+                    fact_type="impact",
+                    status="confirmed",
+                    statement="Rollback restored checkout availability.",
+                    fact_set_version=1,
+                    source_refs=[{"kind": "deployment", "id": "deploy-123"}],
+                    created_at=created_at,
+                )
+            )
+            session.add(
+                HypothesisRow(
+                    hypothesis_id="hypothesis-1",
+                    incident_id="incident-1",
+                    status="proposed",
+                    rank=1,
+                    confidence=0.81,
+                    title="Latest checkout deployment exhausted database connections",
+                    rationale="Deployment timing aligns with the start of saturation metrics.",
+                    evidence_refs=[{"kind": "deployment", "id": "deploy-123"}],
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                RecommendationRow(
+                    recommendation_id="recommendation-1",
+                    incident_id="incident-1",
+                    hypothesis_id="hypothesis-1",
+                    title="Rollback latest checkout deployment",
+                    risk_level="medium",
+                    approval_required=True,
+                    status="pending_approval",
+                    approval_task_id="approval-task-1",
+                    instructions_markdown="Rollback deploy-123 and monitor connection pool recovery.",
+                    source_refs=[{"kind": "deployment", "id": "deploy-123"}],
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                ApprovalTaskRow(
+                    approval_task_id="approval-task-1",
+                    incident_id="incident-1",
+                    recommendation_id="recommendation-1",
+                    status="pending",
+                    comment=None,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                CommsDraftRow(
+                    draft_id="draft-1",
+                    incident_id="incident-1",
+                    channel="internal_slack",
+                    title="Checkout API incident update",
+                    status="draft",
+                    fact_set_version=1,
+                    approval_task_id=None,
+                    published_message_ref=None,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                TimelineEventRow(
+                    event_id="timeline-1",
+                    incident_id="incident-1",
+                    kind="signal_ingested",
+                    summary="Grafana alert detected elevated 5xx errors on checkout-api.",
+                    created_at=created_at,
+                )
+            )
+            session.add(SignalIndexRow(correlation_key="checkout-api:high-error-rate", incident_id="incident-1"))
+
+    @staticmethod
+    def _to_incident(row: IncidentRow) -> IncidentSummary:
+        return IncidentSummary(
+            incident_id=row.incident_id,
+            incident_key=row.incident_key,
+            title=row.title,
+            severity=row.severity,
+            incident_status=row.incident_status,
+            service_name=row.service_name,
+            opened_at=row.opened_at,
+            current_fact_set_version=row.current_fact_set_version,
+            latest_workflow_run_id=row.latest_workflow_run_id,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_fact(row: IncidentFactRow) -> FactSummary:
+        return FactSummary(
+            fact_id=row.fact_id,
+            fact_type=row.fact_type,
+            status=row.status,
+            statement=row.statement,
+            fact_set_version=row.fact_set_version,
+            source_refs=row.source_refs,
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_hypothesis(row: HypothesisRow) -> HypothesisSummary:
+        return HypothesisSummary(
+            hypothesis_id=row.hypothesis_id,
+            status=row.status,
+            rank=row.rank,
+            confidence=row.confidence,
+            title=row.title,
+            rationale=row.rationale,
+            evidence_refs=row.evidence_refs,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_recommendation(row: RecommendationRow) -> RecommendationSummary:
+        return RecommendationSummary(
+            recommendation_id=row.recommendation_id,
+            title=row.title,
+            risk_level=row.risk_level,
+            approval_required=row.approval_required,
+            status=row.status,
+            hypothesis_id=row.hypothesis_id,
+            approval_task_id=row.approval_task_id,
+        )
+
+    @staticmethod
+    def _to_comms(row: CommsDraftRow) -> CommsDraftSummary:
+        return CommsDraftSummary(
+            draft_id=row.draft_id,
+            channel=row.channel,
+            title=row.title,
+            status=row.status,
+            fact_set_version=row.fact_set_version,
+            published_message_ref=row.published_message_ref,
+        )
+
+    @staticmethod
+    def _to_timeline(row: TimelineEventRow) -> TimelineEventSummary:
+        return TimelineEventSummary(
+            event_id=row.event_id,
+            kind=row.kind,
+            summary=row.summary,
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_postmortem(row: PostmortemRow) -> PostmortemSummary:
+        return PostmortemSummary(
+            postmortem_id=row.postmortem_id,
+            incident_id=row.incident_id,
+            status=row.status,
+            fact_set_version=row.fact_set_version,
+            artifact_id=row.artifact_id,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_replay(row: ReplayRunRow) -> ReplayRunSummary:
+        return ReplayRunSummary(
+            replay_run_id=row.replay_run_id,
+            incident_id=row.incident_id,
+            status=row.status,
+            model_bundle_version=row.model_bundle_version,
+            replay_case_id=row.replay_case_id,
+            workflow_run_id=row.workflow_run_id,
+            current_state=row.current_state,
+            error_message=row.error_message,
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_replay_baseline(row: ReplayBaselineRow) -> ReplayBaselineSummary:
+        return ReplayBaselineSummary(
+            baseline_id=row.baseline_id,
+            incident_id=row.incident_id,
+            workflow_run_id=row.workflow_run_id,
+            model_bundle_version=row.model_bundle_version,
+            workflow_type=row.workflow_type,
+            final_state=row.final_state,
+            checkpoint_seq=row.checkpoint_seq,
+            node_summaries=[ReplayNodeSummary.model_validate(item) for item in row.node_summaries],
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_replay_evaluation(row: ReplayEvaluationRow) -> ReplayEvaluationSummary:
+        return ReplayEvaluationSummary(
+            report_id=row.report_id,
+            baseline_id=row.baseline_id,
+            replay_run_id=row.replay_run_id,
+            incident_id=row.incident_id,
+            status=row.status,  # type: ignore[arg-type]
+            score=row.score,
+            mismatch_count=len(row.mismatches),
+            mismatches=row.mismatches,
+            baseline_final_state=row.baseline_final_state,
+            replay_final_state=row.replay_final_state,
+            baseline_checkpoint_seq=row.baseline_checkpoint_seq,
+            replay_checkpoint_seq=row.replay_checkpoint_seq,
+            node_diffs=[ReplayNodeDiffSummary.model_validate(item) for item in row.node_diffs],
+            report_artifact_path=row.report_artifact_path,
+            created_at=row.created_at,
+        )
+
+    def list_incidents(self, workspace_id: str) -> list[IncidentSummary]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(IncidentRow)
+                .where(IncidentRow.ops_workspace_id == workspace_id)
+                .order_by(IncidentRow.opened_at.desc())
+            ).all()
+            return [self._to_incident(row) for row in rows]
+
+    def get_incident_workspace(self, incident_id: str) -> IncidentWorkspaceResponse:
+        with self.session_factory() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            fact_rows = session.scalars(
+                select(IncidentFactRow)
+                .where(IncidentFactRow.incident_id == incident_id)
+                .where(IncidentFactRow.status != "retracted")
+                .order_by(IncidentFactRow.created_at.asc())
+            ).all()
+            hypothesis_rows = session.scalars(
+                select(HypothesisRow)
+                .where(HypothesisRow.incident_id == incident_id)
+                .order_by(HypothesisRow.rank.asc(), HypothesisRow.updated_at.desc())
+            ).all()
+            recommendation_rows = session.scalars(
+                select(RecommendationRow)
+                .where(RecommendationRow.incident_id == incident_id)
+                .order_by(RecommendationRow.recommendation_id.asc())
+            ).all()
+            comms_rows = session.scalars(
+                select(CommsDraftRow)
+                .where(CommsDraftRow.incident_id == incident_id)
+                .order_by(CommsDraftRow.draft_id.asc())
+            ).all()
+            timeline_rows = session.scalars(
+                select(TimelineEventRow)
+                .where(TimelineEventRow.incident_id == incident_id)
+                .order_by(TimelineEventRow.created_at.asc())
+            ).all()
+            return IncidentWorkspaceResponse(
+                incident=self._to_incident(incident_row),
+                confirmed_facts=[self._to_fact(row) for row in fact_rows],
+                hypotheses=[self._to_hypothesis(row) for row in hypothesis_rows],
+                recommendations=[self._to_recommendation(row) for row in recommendation_rows],
+                comms_drafts=[self._to_comms(row) for row in comms_rows],
+                timeline=[self._to_timeline(row) for row in timeline_rows],
+            )
+
+    def list_hypotheses(self, incident_id: str) -> list[HypothesisSummary]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(HypothesisRow)
+                .where(HypothesisRow.incident_id == incident_id)
+                .order_by(HypothesisRow.rank.asc(), HypothesisRow.updated_at.desc())
+            ).all()
+            return [self._to_hypothesis(row) for row in rows]
+
+    def list_recommendations(self, incident_id: str) -> list[RecommendationSummary]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(RecommendationRow)
+                .where(RecommendationRow.incident_id == incident_id)
+                .order_by(RecommendationRow.recommendation_id.asc())
+            ).all()
+            return [self._to_recommendation(row) for row in rows]
+
+    def list_comms(self, incident_id: str) -> list[CommsDraftSummary]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(CommsDraftRow)
+                .where(CommsDraftRow.incident_id == incident_id)
+                .order_by(CommsDraftRow.draft_id.asc())
+            ).all()
+            return [self._to_comms(row) for row in rows]
+
+    def ingest_alert(
+        self,
+        *,
+        ops_workspace_id: str,
+        correlation_key: str,
+        summary: str,
+        observed_at: datetime,
+        source: str,
+    ) -> AlertIngestResponse:
+        signal_id = f"signal-{uuid4().hex[:8]}"
+        with self.session_factory.begin() as session:
+            signal_row = session.get(SignalIndexRow, correlation_key)
+            incident_created = False
+            if signal_row is None:
+                incident_created = True
+                incident_id = f"incident-{uuid4().hex[:8]}"
+                session.add(
+                    IncidentRow(
+                        incident_id=incident_id,
+                        ops_workspace_id=ops_workspace_id,
+                        incident_key=f"INC-{observed_at.year}-{self._next_incident_number(session):04d}",
+                        title=summary,
+                        severity="sev2",
+                        incident_status="investigating",
+                        service_name=correlation_key.split(":")[0],
+                        opened_at=observed_at,
+                        current_fact_set_version=1,
+                        latest_workflow_run_id=None,
+                        updated_at=self._normalize_timestamp(observed_at),
+                    )
+                )
+                session.add(SignalIndexRow(correlation_key=correlation_key, incident_id=incident_id))
+            else:
+                incident_id = signal_row.incident_id
+                incident_row = session.get(IncidentRow, incident_id)
+                if incident_row is not None:
+                    incident_row.updated_at = self._normalize_timestamp(observed_at)  # type: ignore[assignment]
+            session.add(
+                TimelineEventRow(
+                    event_id=f"timeline-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    kind="signal_ingested",
+                    summary=f"{source} alert ingested: {summary}",
+                    created_at=observed_at,
+                )
+            )
+        return AlertIngestResponse(signal_id=signal_id, incident_id=incident_id, incident_created=incident_created)
+
+    def add_fact(self, incident_id: str, command: FactCreateCommand) -> FactMutationResponse:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            if incident_row.current_fact_set_version != command.expected_fact_set_version:
+                raise ValueError("FACT_SET_CONFLICT")
+            incident_row.current_fact_set_version += 1
+            incident_row.updated_at = self._utcnow_naive()
+            fact_id = f"fact-{uuid4().hex[:8]}"
+            session.add(
+                IncidentFactRow(
+                    fact_id=fact_id,
+                    incident_id=incident_id,
+                    fact_type=command.fact_type,
+                    status="confirmed",
+                    statement=command.statement,
+                    fact_set_version=incident_row.current_fact_set_version,
+                    source_refs=command.source_refs,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            session.add(
+                TimelineEventRow(
+                    event_id=f"timeline-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    kind="fact_confirmed",
+                    summary=command.statement,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            return FactMutationResponse(
+                fact_id=fact_id,
+                status="confirmed",
+                current_fact_set_version=incident_row.current_fact_set_version,
+            )
+
+    def retract_fact(self, incident_id: str, fact_id: str, command: FactRetractCommand) -> FactMutationResponse:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            fact_row = session.get(IncidentFactRow, fact_id)
+            if incident_row is None or fact_row is None or fact_row.incident_id != incident_id:
+                raise KeyError(fact_id)
+            if incident_row.current_fact_set_version != command.expected_fact_set_version:
+                raise ValueError("FACT_SET_CONFLICT")
+            incident_row.current_fact_set_version += 1
+            incident_row.updated_at = self._utcnow_naive()
+            fact_row.status = "retracted"
+            fact_row.fact_set_version = incident_row.current_fact_set_version
+            session.add(
+                TimelineEventRow(
+                    event_id=f"timeline-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    kind="fact_retracted",
+                    summary=command.reason,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            return FactMutationResponse(
+                fact_id=fact_id,
+                status="retracted",
+                current_fact_set_version=incident_row.current_fact_set_version,
+            )
+
+    def override_severity(self, incident_id: str, command: SeverityOverrideCommand) -> IncidentSummary:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            if command.expected_updated_at is not None and not self._timestamps_match(
+                incident_row.updated_at,
+                command.expected_updated_at,
+            ):
+                raise ValueError("CONFLICT_STALE_RESOURCE")
+            incident_row.severity = command.severity
+            incident_row.updated_at = self._utcnow_naive()
+            session.add(
+                TimelineEventRow(
+                    event_id=f"timeline-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    kind="severity_changed",
+                    summary=command.reason,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            return self._to_incident(incident_row)
+
+    def decide_hypothesis(
+        self,
+        incident_id: str,
+        hypothesis_id: str,
+        command: HypothesisDecisionCommand,
+    ) -> HypothesisDecisionResponse:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            hypothesis_row = session.get(HypothesisRow, hypothesis_id)
+            if incident_row is None or hypothesis_row is None or hypothesis_row.incident_id != incident_id:
+                raise KeyError(hypothesis_id)
+            if command.expected_updated_at is not None and not self._timestamps_match(
+                hypothesis_row.updated_at,
+                command.expected_updated_at,
+            ):
+                raise ValueError("CONFLICT_STALE_RESOURCE")
+            if hypothesis_row.status in {"accepted", "rejected"}:
+                raise ValueError("HYPOTHESIS_STATUS_CONFLICT")
+            hypothesis_row.status = "accepted" if command.decision == "accept" else "rejected"
+            hypothesis_row.updated_at = self._utcnow_naive()
+            incident_row.updated_at = self._utcnow_naive()
+            session.add(
+                TimelineEventRow(
+                    event_id=f"timeline-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    kind="hypothesis_resolved",
+                    summary=f"{hypothesis_row.title}: {hypothesis_row.status}",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            return HypothesisDecisionResponse(
+                hypothesis_id=hypothesis_id,
+                status=hypothesis_row.status,
+            )
+
+    def decide_recommendation(
+        self,
+        incident_id: str,
+        recommendation_id: str,
+        command: RecommendationDecisionCommand,
+    ) -> RecommendationDecisionResponse:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            recommendation_row = session.get(RecommendationRow, recommendation_id)
+            if (
+                incident_row is None
+                or recommendation_row is None
+                or recommendation_row.incident_id != incident_id
+            ):
+                raise KeyError(recommendation_id)
+            approval_row = None
+            if recommendation_row.approval_task_id is not None:
+                approval_row = session.get(ApprovalTaskRow, recommendation_row.approval_task_id)
+            if command.expected_updated_at is not None and not self._timestamps_match(
+                recommendation_row.updated_at,
+                command.expected_updated_at,
+            ):
+                raise ValueError("CONFLICT_STALE_RESOURCE")
+            if recommendation_row.approval_required and command.decision in {"approve", "mark_executed", "reject"}:
+                if approval_row is None and not command.approval_task_id:
+                    raise ValueError("APPROVAL_REQUIRED")
+                if approval_row is None and command.approval_task_id:
+                    approval_row = ApprovalTaskRow(
+                        approval_task_id=command.approval_task_id,
+                        incident_id=incident_id,
+                        recommendation_id=recommendation_id,
+                        status="pending",
+                        comment=None,
+                        created_at=self._utcnow_naive(),
+                        updated_at=self._utcnow_naive(),
+                    )
+                    session.add(approval_row)
+                    recommendation_row.approval_task_id = command.approval_task_id
+                elif approval_row is not None:
+                    recommendation_row.approval_task_id = approval_row.approval_task_id
+            if command.decision == "approve":
+                recommendation_row.status = "approved"
+                if approval_row is not None:
+                    approval_row.status = "approved"
+                    approval_row.comment = command.comment or None
+                    approval_row.updated_at = self._utcnow_naive()
+            elif command.decision == "reject":
+                recommendation_row.status = "rejected"
+                if approval_row is not None:
+                    approval_row.status = "rejected"
+                    approval_row.comment = command.comment or None
+                    approval_row.updated_at = self._utcnow_naive()
+            else:
+                if recommendation_row.approval_required and (approval_row is None or approval_row.status != "approved"):
+                    raise ValueError("APPROVAL_REQUIRED")
+                recommendation_row.status = "executed"
+            recommendation_row.updated_at = self._utcnow_naive()
+            incident_row.updated_at = self._utcnow_naive()
+            session.add(
+                TimelineEventRow(
+                    event_id=f"timeline-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    kind="recommendation_updated",
+                    summary=f"{recommendation_row.title}: {recommendation_row.status}",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            return RecommendationDecisionResponse(
+                recommendation_id=recommendation_id,
+                status=recommendation_row.status,
+            )
+
+    def publish_comms(
+        self,
+        incident_id: str,
+        draft_id: str,
+        command: CommsPublishCommand,
+    ) -> CommsPublishResponse:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            comms_row = session.get(CommsDraftRow, draft_id)
+            if incident_row is None or comms_row is None or comms_row.incident_id != incident_id:
+                raise KeyError(draft_id)
+            if comms_row.fact_set_version != command.expected_fact_set_version:
+                raise ValueError("COMM_DRAFT_STALE_FACT_SET")
+            if comms_row.approval_task_id is not None:
+                approval_row = session.get(ApprovalTaskRow, comms_row.approval_task_id)
+                if approval_row is None or approval_row.status != "approved":
+                    raise ValueError("APPROVAL_REQUIRED")
+            if comms_row.status == "published":
+                raise ValueError("COMM_DRAFT_ALREADY_PUBLISHED")
+            comms_row.status = "published"
+            comms_row.published_message_ref = f"{comms_row.channel}-msg-{uuid4().hex[:8]}"
+            comms_row.updated_at = self._utcnow_naive()
+            incident_row.updated_at = self._utcnow_naive()
+            session.add(
+                TimelineEventRow(
+                    event_id=f"timeline-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    kind="comms_published",
+                    summary=f"Published {comms_row.channel} draft {draft_id}.",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            return CommsPublishResponse(
+                draft_id=draft_id,
+                status=comms_row.status,
+                published_message_ref=comms_row.published_message_ref,
+            )
+
+    def resolve_incident(self, incident_id: str, command: ResolveIncidentCommand) -> IncidentSummary:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            if command.expected_updated_at is not None and not self._timestamps_match(
+                incident_row.updated_at,
+                command.expected_updated_at,
+            ):
+                raise ValueError("CONFLICT_STALE_RESOURCE")
+            incident_row.incident_status = "resolved"
+            incident_row.updated_at = self._utcnow_naive()
+            session.add(
+                TimelineEventRow(
+                    event_id=f"timeline-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    kind="incident_resolved",
+                    summary=command.resolution_summary,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            return self._to_incident(incident_row)
+
+    def close_incident(self, incident_id: str, command: CloseIncidentCommand) -> IncidentSummary:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            if command.expected_updated_at is not None and not self._timestamps_match(
+                incident_row.updated_at,
+                command.expected_updated_at,
+            ):
+                raise ValueError("CONFLICT_STALE_RESOURCE")
+            incident_row.incident_status = "closed"
+            incident_row.updated_at = self._utcnow_naive()
+            session.add(
+                TimelineEventRow(
+                    event_id=f"timeline-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    kind="incident_closed",
+                    summary=command.close_reason,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            return self._to_incident(incident_row)
+
+    def get_postmortem(self, incident_id: str) -> PostmortemSummary:
+        with self.session_factory() as session:
+            row = session.scalars(
+                select(PostmortemRow).where(PostmortemRow.incident_id == incident_id).limit(1)
+            ).first()
+            if row is None:
+                raise KeyError(incident_id)
+            return self._to_postmortem(row)
+
+    def start_replay_run(self, command: ReplayRunCommand) -> ReplayRunSummary:
+        replay_run_id = f"replay-{uuid4().hex[:8]}"
+        created_at = self._utcnow_naive()
+        with self.session_factory.begin() as session:
+            if command.incident_id is not None:
+                incident_row = session.get(IncidentRow, command.incident_id)
+                if incident_row is None:
+                    raise KeyError(command.incident_id)
+                incident_id = incident_row.incident_id
+                ops_workspace_id = incident_row.ops_workspace_id
+            else:
+                incident_id = f"replay-case:{command.replay_case_id}"
+                ops_workspace_id = "ops-ws-1"
+            session.add(
+                ReplayRunRow(
+                    replay_run_id=replay_run_id,
+                    ops_workspace_id=ops_workspace_id,
+                    incident_id=incident_id,
+                    replay_case_id=command.replay_case_id,
+                    status="queued",
+                    model_bundle_version=command.model_bundle_version,
+                    workflow_run_id=None,
+                    current_state=None,
+                    error_message=None,
+                    created_at=created_at,
+                )
+            )
+        return ReplayRunSummary(
+            replay_run_id=replay_run_id,
+            incident_id=incident_id,
+            status="queued",
+            model_bundle_version=command.model_bundle_version,
+            replay_case_id=command.replay_case_id,
+            created_at=created_at,
+        )
+
+    def list_replays(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayRunSummary]:
+        with self.session_factory() as session:
+            stmt = select(ReplayRunRow).where(ReplayRunRow.ops_workspace_id == workspace_id)
+            if incident_id is not None:
+                stmt = stmt.where(ReplayRunRow.incident_id == incident_id)
+            rows = session.scalars(stmt.order_by(ReplayRunRow.created_at.desc())).all()
+            return [self._to_replay(row) for row in rows]
+
+    def get_replay_run(self, replay_run_id: str) -> ReplayRunSummary:
+        with self.session_factory() as session:
+            row = session.get(ReplayRunRow, replay_run_id)
+            if row is None:
+                raise KeyError(replay_run_id)
+            return self._to_replay(row)
+
+    def record_replay_baseline(
+        self,
+        *,
+        incident_id: str,
+        workflow_run_id: str,
+        model_bundle_version: str,
+        workflow_type: str,
+        final_state: str,
+        checkpoint_seq: int,
+        node_summaries: list[ReplayNodeSummary],
+    ) -> ReplayBaselineSummary:
+        baseline_id = f"baseline-{uuid4().hex[:8]}"
+        created_at = self._utcnow_naive()
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            session.add(
+                ReplayBaselineRow(
+                    baseline_id=baseline_id,
+                    ops_workspace_id=incident_row.ops_workspace_id,
+                    incident_id=incident_id,
+                    workflow_run_id=workflow_run_id,
+                    model_bundle_version=model_bundle_version,
+                    workflow_type=workflow_type,
+                    final_state=final_state,
+                    checkpoint_seq=checkpoint_seq,
+                    node_summaries=[item.model_dump(mode="json") for item in node_summaries],
+                    created_at=created_at,
+                )
+            )
+        return ReplayBaselineSummary(
+            baseline_id=baseline_id,
+            incident_id=incident_id,
+            workflow_run_id=workflow_run_id,
+            model_bundle_version=model_bundle_version,
+            workflow_type=workflow_type,
+            final_state=final_state,
+            checkpoint_seq=checkpoint_seq,
+            node_summaries=node_summaries,
+            created_at=created_at,
+        )
+
+    def list_replay_baselines(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayBaselineSummary]:
+        with self.session_factory() as session:
+            stmt = select(ReplayBaselineRow).where(ReplayBaselineRow.ops_workspace_id == workspace_id)
+            if incident_id is not None:
+                stmt = stmt.where(ReplayBaselineRow.incident_id == incident_id)
+            rows = session.scalars(stmt.order_by(ReplayBaselineRow.created_at.desc())).all()
+            return [self._to_replay_baseline(row) for row in rows]
+
+    def get_replay_baseline(self, baseline_id: str) -> ReplayBaselineSummary:
+        with self.session_factory() as session:
+            row = session.get(ReplayBaselineRow, baseline_id)
+            if row is None:
+                raise KeyError(baseline_id)
+            return self._to_replay_baseline(row)
+
+    def record_replay_evaluation(
+        self,
+        *,
+        baseline_id: str,
+        replay_run_id: str,
+        incident_id: str,
+        status: str,
+        score: float,
+        mismatches: list[str],
+        baseline_final_state: str | None = None,
+        replay_final_state: str | None = None,
+        baseline_checkpoint_seq: int | None = None,
+        replay_checkpoint_seq: int | None = None,
+        node_diffs: list[ReplayNodeDiffSummary] | None = None,
+        report_artifact_path: str | None = None,
+    ) -> ReplayEvaluationSummary:
+        report_id = f"report-{uuid4().hex[:8]}"
+        created_at = self._utcnow_naive()
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            session.add(
+                ReplayEvaluationRow(
+                    report_id=report_id,
+                    ops_workspace_id=incident_row.ops_workspace_id,
+                    baseline_id=baseline_id,
+                    replay_run_id=replay_run_id,
+                    incident_id=incident_id,
+                    status=status,
+                    score=score,
+                    mismatches=mismatches,
+                    baseline_final_state=baseline_final_state,
+                    replay_final_state=replay_final_state,
+                    baseline_checkpoint_seq=baseline_checkpoint_seq,
+                    replay_checkpoint_seq=replay_checkpoint_seq,
+                    node_diffs=[item.model_dump() for item in (node_diffs or [])],
+                    report_artifact_path=report_artifact_path,
+                    created_at=created_at,
+                )
+            )
+        return ReplayEvaluationSummary(
+            report_id=report_id,
+            baseline_id=baseline_id,
+            replay_run_id=replay_run_id,
+            incident_id=incident_id,
+            status=status,  # type: ignore[arg-type]
+            score=score,
+            mismatch_count=len(mismatches),
+            mismatches=mismatches,
+            baseline_final_state=baseline_final_state,
+            replay_final_state=replay_final_state,
+            baseline_checkpoint_seq=baseline_checkpoint_seq,
+            replay_checkpoint_seq=replay_checkpoint_seq,
+            node_diffs=node_diffs or [],
+            report_artifact_path=report_artifact_path,
+            created_at=created_at,
+        )
+
+    def list_replay_evaluations(
+        self,
+        workspace_id: str,
+        incident_id: str | None = None,
+        replay_run_id: str | None = None,
+    ) -> list[ReplayEvaluationSummary]:
+        with self.session_factory() as session:
+            stmt = select(ReplayEvaluationRow).where(ReplayEvaluationRow.ops_workspace_id == workspace_id)
+            if incident_id is not None:
+                stmt = stmt.where(ReplayEvaluationRow.incident_id == incident_id)
+            if replay_run_id is not None:
+                stmt = stmt.where(ReplayEvaluationRow.replay_run_id == replay_run_id)
+            rows = session.scalars(stmt.order_by(ReplayEvaluationRow.created_at.desc())).all()
+            return [self._to_replay_evaluation(row) for row in rows]
+
+    def attach_replay_evaluation_artifact(
+        self,
+        report_id: str,
+        *,
+        report_artifact_path: str,
+    ) -> ReplayEvaluationSummary:
+        with self.session_factory.begin() as session:
+            row = session.get(ReplayEvaluationRow, report_id)
+            if row is None:
+                raise KeyError(report_id)
+            row.report_artifact_path = report_artifact_path
+            return self._to_replay_evaluation(row)
+
+    def update_replay_status(self, replay_run_id: str, command: ReplayStatusCommand) -> ReplayRunSummary:
+        with self.session_factory.begin() as session:
+            replay_row = session.get(ReplayRunRow, replay_run_id)
+            if replay_row is None:
+                raise KeyError(replay_run_id)
+            replay_row.status = command.status
+            incident_row = session.get(IncidentRow, replay_row.incident_id)
+            if incident_row is not None:
+                incident_row.updated_at = self._utcnow_naive()
+                session.add(
+                    TimelineEventRow(
+                        event_id=f"timeline-{uuid4().hex[:8]}",
+                        incident_id=incident_row.incident_id,
+                        kind="replay_status_updated",
+                        summary=f"Replay {replay_run_id} -> {command.status}",
+                        created_at=datetime.now(UTC),
+                    )
+                )
+            return self._to_replay(replay_row)
+
+    def mark_replay_execution(
+        self,
+        replay_run_id: str,
+        *,
+        status: str,
+        workflow_run_id: str | None = None,
+        current_state: str | None = None,
+        error_message: str | None = None,
+    ) -> ReplayRunSummary:
+        with self.session_factory.begin() as session:
+            replay_row = session.get(ReplayRunRow, replay_run_id)
+            if replay_row is None:
+                raise KeyError(replay_run_id)
+            replay_row.status = status
+            replay_row.workflow_run_id = workflow_run_id
+            replay_row.current_state = current_state
+            replay_row.error_message = error_message
+            incident_row = session.get(IncidentRow, replay_row.incident_id)
+            if incident_row is not None:
+                incident_row.updated_at = self._utcnow_naive()
+                session.add(
+                    TimelineEventRow(
+                        event_id=f"timeline-{uuid4().hex[:8]}",
+                        incident_id=incident_row.incident_id,
+                        kind="replay_status_updated",
+                        summary=f"Replay {replay_run_id} -> {status}",
+                        created_at=datetime.now(UTC),
+                    )
+                )
+            return self._to_replay(replay_row)
+
+    def get_incident_execution_seed(self, incident_id: str) -> dict[str, object]:
+        with self.session_factory() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            fact_rows = session.scalars(
+                select(IncidentFactRow)
+                .where(IncidentFactRow.incident_id == incident_id)
+                .where(IncidentFactRow.status == "confirmed")
+                .order_by(IncidentFactRow.created_at.asc())
+            ).all()
+            hypothesis_rows = session.scalars(
+                select(HypothesisRow)
+                .where(HypothesisRow.incident_id == incident_id)
+                .where(HypothesisRow.status != "rejected")
+                .order_by(HypothesisRow.rank.asc())
+            ).all()
+            comms_rows = session.scalars(
+                select(CommsDraftRow)
+                .where(CommsDraftRow.incident_id == incident_id)
+                .order_by(CommsDraftRow.created_at.asc())
+            ).all()
+            return {
+                "incident_id": incident_row.incident_id,
+                "ops_workspace_id": incident_row.ops_workspace_id,
+                "signal_ids": [],
+                "signal_summaries": [],
+                "current_incident_candidates": [],
+                "context_bundle_id": "context-1",
+                "current_fact_set_version": incident_row.current_fact_set_version,
+                "confirmed_fact_refs": [
+                    {"kind": "incident_fact", "id": row.fact_id} for row in fact_rows
+                ],
+                "top_hypothesis_refs": [
+                    {"kind": "hypothesis", "id": row.hypothesis_id} for row in hypothesis_rows[:3]
+                ],
+                "target_channels": [row.channel for row in comms_rows] or ["internal_slack"],
+                "organization_id": "org-1",
+                "workspace_id": "ws-1",
+            }
+
+    def record_incident_response_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            incident_row.incident_status = (
+                "responding" if checkpoint_seq < 4 else "resolved_pending_confirmation"
+            )
+            incident_row.severity = "sev1"
+            incident_row.latest_workflow_run_id = workflow_run_id
+            incident_row.updated_at = self._utcnow_naive()
+
+            hypothesis_exists = session.scalar(
+                select(HypothesisRow.hypothesis_id).where(HypothesisRow.incident_id == incident_id).limit(1)
+            )
+            if hypothesis_exists is None:
+                session.add(
+                    HypothesisRow(
+                        hypothesis_id="hypothesis-generated-1",
+                        incident_id=incident_id,
+                        status="proposed",
+                        rank=1,
+                        confidence=0.73,
+                        title="Generated incident hypothesis",
+                        rationale="Workflow generated a top-ranked root-cause candidate.",
+                        evidence_refs=[],
+                        created_at=self._utcnow_naive(),
+                        updated_at=self._utcnow_naive(),
+                    )
+                )
+
+            recommendation_exists = session.scalar(
+                select(RecommendationRow.recommendation_id)
+                .where(RecommendationRow.incident_id == incident_id)
+                .limit(1)
+            )
+            if recommendation_exists is None:
+                approval_task_id = f"approval-task-{uuid4().hex[:8]}"
+                session.add(
+                    RecommendationRow(
+                        recommendation_id="recommendation-generated-1",
+                        incident_id=incident_id,
+                        hypothesis_id="hypothesis-generated-1",
+                        title="Scale checkout workers",
+                        risk_level="medium",
+                        approval_required=True,
+                        status="pending_approval",
+                        approval_task_id=approval_task_id,
+                        instructions_markdown="Scale worker pool and watch queue depth.",
+                        source_refs=[],
+                        created_at=self._utcnow_naive(),
+                        updated_at=self._utcnow_naive(),
+                    )
+                )
+                session.add(
+                    ApprovalTaskRow(
+                        approval_task_id=approval_task_id,
+                        incident_id=incident_id,
+                        recommendation_id="recommendation-generated-1",
+                        status="pending",
+                        comment=None,
+                        created_at=self._utcnow_naive(),
+                        updated_at=self._utcnow_naive(),
+                    )
+                )
+            comms_exists = session.scalar(
+                select(CommsDraftRow.draft_id).where(CommsDraftRow.incident_id == incident_id).limit(1)
+            )
+            if comms_exists is None:
+                session.add(
+                    CommsDraftRow(
+                        draft_id="draft-generated-1",
+                        incident_id=incident_id,
+                        channel="internal_slack",
+                        title="Generated incident update",
+                        status="draft",
+                        fact_set_version=incident_row.current_fact_set_version,
+                        approval_task_id=None,
+                        published_message_ref=None,
+                        created_at=self._utcnow_naive(),
+                        updated_at=self._utcnow_naive(),
+                    )
+                )
+
+    def record_retrospective_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None:
+        now = datetime.now(UTC)
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            incident_row.incident_status = "closed" if checkpoint_seq > 0 else "resolved"
+            incident_row.latest_workflow_run_id = workflow_run_id
+            incident_row.updated_at = self._normalize_timestamp(now)  # type: ignore[assignment]
+            session.add(
+                TimelineEventRow(
+                    event_id=f"timeline-{uuid4().hex[:8]}",
+                    incident_id=incident_id,
+                    kind="postmortem_ready",
+                    summary="Postmortem draft generated.",
+                    created_at=now,
+                )
+            )
+            postmortem_row = session.scalars(
+                select(PostmortemRow).where(PostmortemRow.incident_id == incident_id).limit(1)
+            ).first()
+            if postmortem_row is None:
+                session.add(
+                    PostmortemRow(
+                        postmortem_id=f"postmortem-{uuid4().hex[:8]}",
+                        incident_id=incident_id,
+                        status="draft",
+                        fact_set_version=incident_row.current_fact_set_version,
+                        artifact_id=None,
+                        updated_at=now,
+                    )
+                )
+            else:
+                postmortem_row.status = "draft"
+                postmortem_row.fact_set_version = incident_row.current_fact_set_version
+                postmortem_row.updated_at = now
+
+    @staticmethod
+    def _normalize_timestamp(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(UTC).replace(tzinfo=None)
+
+    @classmethod
+    def _utcnow_naive(cls) -> datetime:
+        return cls._normalize_timestamp(datetime.now(UTC))  # type: ignore[return-value]
+
+    @classmethod
+    def _timestamps_match(cls, stored: datetime, expected: datetime) -> bool:
+        return cls._normalize_timestamp(stored) == cls._normalize_timestamp(expected)
+
+    @staticmethod
+    def _next_incident_number(session: Session) -> int:
+        incident_ids = session.scalars(select(IncidentRow.incident_id)).all()
+        return len(incident_ids) + 1

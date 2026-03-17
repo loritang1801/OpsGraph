@@ -1,0 +1,26 @@
+[project]
+name = "opsgraph"
+version = "0.1.0"
+description = "OpsGraph product repository skeleton."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.11,<3.0",
+    "sqlalchemy>=2.0,<3.0",
+]
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.110,<1.0",
+    "uvicorn>=0.30,<1.0",
+]
+
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["opsgraph_app*"]

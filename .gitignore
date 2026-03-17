@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+dist/
+build/
+replay_fixtures/
+replay_reports/
+shared_core/__pycache__/

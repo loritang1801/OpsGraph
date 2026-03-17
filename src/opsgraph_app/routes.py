@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import importlib
+
+from .api_models import (
+    AlertIngestCommand,
+    AlertIngestResponse,
+    CloseIncidentCommand,
+    CommsDraftSummary,
+    CommsPublishCommand,
+    CommsPublishResponse,
+    FactCreateCommand,
+    FactMutationResponse,
+    FactRetractCommand,
+    FactSummary,
+    HealthResponse,
+    HypothesisDecisionCommand,
+    HypothesisDecisionResponse,
+    HypothesisSummary,
+    IncidentResponseCommand,
+    IncidentSummary,
+    IncidentWorkspaceResponse,
+    RecommendationSummary,
+    ReplayBaselineCaptureCommand,
+    ReplayBaselineSummary,
+    ReplayEvaluationCommand,
+    ReplayEvaluationSummary,
+    RecommendationDecisionCommand,
+    RecommendationDecisionResponse,
+    OpsGraphRunResponse,
+    OpsGraphWorkflowStateResponse,
+    PostmortemSummary,
+    ReplayRunCommand,
+    ReplayStatusCommand,
+    ReplayRunSummary,
+    ResolveIncidentCommand,
+    RetrospectiveCommand,
+    SeverityOverrideCommand,
+)
+from .service import OpsGraphAppService
+from .shared_runtime import load_shared_agent_platform
+
+
+def create_fastapi_app(service: OpsGraphAppService):
+    ap = load_shared_agent_platform()
+    try:
+        from fastapi import FastAPI
+    except ImportError as exc:
+        errors_module = importlib.import_module(f"{ap.__name__}.errors")
+        FastAPIUnavailableError = errors_module.FastAPIUnavailableError
+
+        raise FastAPIUnavailableError("fastapi is not installed") from exc
+
+    app = FastAPI(title="OpsGraph API")
+
+    @app.get("/health", response_model=HealthResponse)
+    def health() -> HealthResponse:
+        return HealthResponse(status="ok", product="opsgraph")
+
+    @app.get("/api/v1/workflows")
+    def list_workflows():
+        return service.list_workflows()
+
+    @app.get("/api/v1/workflows/{workflow_run_id}", response_model=OpsGraphWorkflowStateResponse)
+    def get_workflow_state(workflow_run_id: str) -> OpsGraphWorkflowStateResponse:
+        return service.get_workflow_state(workflow_run_id)
+
+    @app.post("/api/v1/opsgraph/alerts/prometheus", response_model=AlertIngestResponse)
+    def ingest_prometheus_alert(command: AlertIngestCommand) -> AlertIngestResponse:
+        return service.ingest_alert(command)
+
+    @app.get("/api/v1/opsgraph/incidents")
+    def list_incidents(workspace_id: str):
+        return service.list_incidents(workspace_id)
+
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}", response_model=IncidentWorkspaceResponse)
+    def get_incident_workspace(incident_id: str) -> IncidentWorkspaceResponse:
+        return service.get_incident_workspace(incident_id)
+
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/hypotheses")
+    def list_hypotheses(incident_id: str) -> list[HypothesisSummary]:
+        return service.list_hypotheses(incident_id)
+
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/facts", response_model=FactMutationResponse)
+    def add_fact(incident_id: str, command: FactCreateCommand) -> FactMutationResponse:
+        return service.add_fact(incident_id, command)
+
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/facts/{fact_id}/retract", response_model=FactMutationResponse)
+    def retract_fact(incident_id: str, fact_id: str, command: FactRetractCommand) -> FactMutationResponse:
+        return service.retract_fact(incident_id, fact_id, command)
+
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/severity", response_model=IncidentSummary)
+    def override_severity(incident_id: str, command: SeverityOverrideCommand) -> IncidentSummary:
+        return service.override_severity(incident_id, command)
+
+    @app.post(
+        "/api/v1/opsgraph/incidents/{incident_id}/hypotheses/{hypothesis_id}/decision",
+        response_model=HypothesisDecisionResponse,
+    )
+    def decide_hypothesis(
+        incident_id: str,
+        hypothesis_id: str,
+        command: HypothesisDecisionCommand,
+    ) -> HypothesisDecisionResponse:
+        return service.decide_hypothesis(incident_id, hypothesis_id, command)
+
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/recommendations")
+    def list_recommendations(incident_id: str) -> list[RecommendationSummary]:
+        return service.list_recommendations(incident_id)
+
+    @app.post(
+        "/api/v1/opsgraph/incidents/{incident_id}/recommendations/{recommendation_id}/decision",
+        response_model=RecommendationDecisionResponse,
+    )
+    def decide_recommendation(
+        incident_id: str,
+        recommendation_id: str,
+        command: RecommendationDecisionCommand,
+    ) -> RecommendationDecisionResponse:
+        return service.decide_recommendation(incident_id, recommendation_id, command)
+
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/comms")
+    def list_comms(incident_id: str) -> list[CommsDraftSummary]:
+        return service.list_comms(incident_id)
+
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/comms/{draft_id}/publish", response_model=CommsPublishResponse)
+    def publish_comms(
+        incident_id: str,
+        draft_id: str,
+        command: CommsPublishCommand,
+    ) -> CommsPublishResponse:
+        return service.publish_comms(incident_id, draft_id, command)
+
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/resolve", response_model=IncidentSummary)
+    def resolve_incident(incident_id: str, command: ResolveIncidentCommand) -> IncidentSummary:
+        return service.resolve_incident(incident_id, command)
+
+    @app.post("/api/v1/opsgraph/incidents/{incident_id}/close", response_model=IncidentSummary)
+    def close_incident(incident_id: str, command: CloseIncidentCommand) -> IncidentSummary:
+        return service.close_incident(incident_id, command)
+
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/postmortem", response_model=PostmortemSummary)
+    def get_postmortem(incident_id: str) -> PostmortemSummary:
+        return service.get_postmortem(incident_id)
+
+    @app.post("/api/v1/opsgraph/incidents/respond", response_model=OpsGraphRunResponse)
+    def respond_to_incident(command: IncidentResponseCommand) -> OpsGraphRunResponse:
+        return service.respond_to_incident(command)
+
+    @app.post("/api/v1/opsgraph/incidents/retrospective", response_model=OpsGraphRunResponse)
+    def build_retrospective(command: RetrospectiveCommand) -> OpsGraphRunResponse:
+        return service.build_retrospective(command)
+
+    @app.post("/api/v1/opsgraph/replays/run", response_model=ReplayRunSummary)
+    def start_replay_run(command: ReplayRunCommand) -> ReplayRunSummary:
+        return service.start_replay_run(command)
+
+    @app.get("/api/v1/opsgraph/replays")
+    def list_replays(workspace_id: str, incident_id: str | None = None) -> list[ReplayRunSummary]:
+        return service.list_replays(workspace_id, incident_id)
+
+    @app.get("/api/v1/opsgraph/replays/baselines")
+    def list_replay_baselines(
+        workspace_id: str,
+        incident_id: str | None = None,
+    ) -> list[ReplayBaselineSummary]:
+        return service.list_replay_baselines(workspace_id, incident_id)
+
+    @app.post("/api/v1/opsgraph/replays/baselines/capture", response_model=ReplayBaselineSummary)
+    def capture_replay_baseline(command: ReplayBaselineCaptureCommand) -> ReplayBaselineSummary:
+        return service.capture_replay_baseline(command)
+
+    @app.post("/api/v1/opsgraph/replays/{replay_run_id}/status", response_model=ReplayRunSummary)
+    def update_replay_status(replay_run_id: str, command: ReplayStatusCommand) -> ReplayRunSummary:
+        return service.update_replay_status(replay_run_id, command)
+
+    @app.post("/api/v1/opsgraph/replays/{replay_run_id}/execute", response_model=ReplayRunSummary)
+    def execute_replay_run(replay_run_id: str) -> ReplayRunSummary:
+        return service.execute_replay_run(replay_run_id)
+
+    @app.post("/api/v1/opsgraph/replays/{replay_run_id}/evaluate", response_model=ReplayEvaluationSummary)
+    def evaluate_replay_run(
+        replay_run_id: str,
+        command: ReplayEvaluationCommand,
+    ) -> ReplayEvaluationSummary:
+        return service.evaluate_replay_run(replay_run_id, command)
+
+    @app.get("/api/v1/opsgraph/replays/reports")
+    def list_replay_reports(
+        workspace_id: str,
+        incident_id: str | None = None,
+        replay_run_id: str | None = None,
+    ) -> list[ReplayEvaluationSummary]:
+        return service.list_replay_evaluations(workspace_id, incident_id, replay_run_id)
+
+    return app
