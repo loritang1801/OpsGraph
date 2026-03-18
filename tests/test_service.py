@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -34,6 +35,12 @@ from opsgraph_app.sample_payloads import (
     retrospective_command,
     severity_override_command,
 )
+
+
+def _create_repo_tempdir(prefix: str) -> Path:
+    temp_root = ROOT / ".tmp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=temp_root))
 
 
 class OpsGraphServiceTests(unittest.TestCase):
@@ -884,26 +891,27 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(closed.incident_status, "closed")
 
     def test_sqlalchemy_repository_persists_incident_updates_across_service_instances(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            database_url = f"sqlite+pysqlite:///{Path(tmp_dir) / 'opsgraph.db'}"
+        tmp_dir = _create_repo_tempdir("opsgraph-db-")
+        database_url = f"sqlite+pysqlite:///{(tmp_dir / 'opsgraph.db').resolve().as_posix()}"
 
-            service_one = build_app_service(database_url=database_url)
-            service_two = None
-            try:
-                ingest = service_one.ingest_alert(
-                    alert_ingest_command(
-                        correlation_key="payments-api:latency-spike",
-                        summary="Payments API latency spike",
-                    )
+        service_one = build_app_service(database_url=database_url)
+        service_two = None
+        try:
+            ingest = service_one.ingest_alert(
+                alert_ingest_command(
+                    correlation_key="payments-api:latency-spike",
+                    summary="Payments API latency spike",
                 )
-                service_one.close()
+            )
+            service_one.close()
 
-                service_two = build_app_service(database_url=database_url)
-                incidents = service_two.list_incidents("ops-ws-1")
+            service_two = build_app_service(database_url=database_url)
+            incidents = service_two.list_incidents("ops-ws-1")
 
-                self.assertTrue(ingest.incident_created)
-                self.assertTrue(any(item.incident_id == ingest.incident_id for item in incidents))
-            finally:
-                service_one.close()
-                if service_two is not None:
-                    service_two.close()
+            self.assertTrue(ingest.incident_created)
+            self.assertTrue(any(item.incident_id == ingest.incident_id for item in incidents))
+        finally:
+            service_one.close()
+            if service_two is not None:
+                service_two.close()
+            shutil.rmtree(tmp_dir, ignore_errors=True)
