@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+from contextlib import asynccontextmanager
 import importlib
 import json
 from datetime import UTC, datetime
@@ -14,11 +15,16 @@ ERROR_STATUS_BY_CODE = {
     "FACT_VERSION_CONFLICT": 409,
     "HYPOTHESIS_STATUS_CONFLICT": 409,
     "RECOMMENDATION_STATUS_CONFLICT": 409,
+    "APPROVAL_STATUS_CONFLICT": 409,
     "APPROVAL_REQUIRED": 409,
     "COMM_DRAFT_STALE_FACT_SET": 409,
     "COMM_DRAFT_ALREADY_PUBLISHED": 409,
     "INCIDENT_ALREADY_RESOLVED": 409,
     "INCIDENT_NOT_RESOLVED": 409,
+    "APPROVAL_DECISION_INVALID": 422,
+    "APPROVAL_EXECUTION_REQUIRES_RECOMMENDATION": 422,
+    "APPROVAL_PUBLISH_FACT_SET_REQUIRED": 422,
+    "APPROVAL_DRAFT_SELECTION_INVALID": 422,
     "REPLAY_RUN_NOT_EXECUTED": 409,
     "REPLAY_STATUS_CONFLICT": 409,
     "ROOT_CAUSE_FACT_REQUIRED": 422,
@@ -27,6 +33,8 @@ ERROR_STATUS_BY_CODE = {
 }
 
 from .api_models import (
+    ApprovalDecisionCommand,
+    ApprovalDecisionResponse,
     AlertIngestCommand,
     AlertIngestResponse,
     ApprovalTaskSummary,
@@ -65,6 +73,14 @@ from .api_models import (
     RetrospectiveCommand,
     SeverityOverrideCommand,
 )
+from .auth import (
+    CurrentUserResponse,
+    HeaderOpsGraphAuthorizer,
+    MembershipProvisionCommand,
+    MembershipUpdateCommand,
+    OpsGraphAuthorizationError,
+    SessionCreateCommand,
+)
 from .service import OpsGraphAppService
 from .shared_runtime import load_shared_agent_platform
 
@@ -74,7 +90,12 @@ MAX_PAGE_LIMIT = 100
 
 def map_domain_error(exc: Exception, *, path: str = "") -> tuple[int, dict[str, object]]:
     if isinstance(exc, KeyError):
-        code = "INCIDENT_NOT_FOUND" if "/incidents/" in path else "RESOURCE_NOT_FOUND"
+        if "/incidents/" in path:
+            code = "INCIDENT_NOT_FOUND"
+        elif "/approval-tasks/" in path or "/approvals/" in path:
+            code = "APPROVAL_TASK_NOT_FOUND"
+        else:
+            code = "RESOURCE_NOT_FOUND"
         resource_id = str(exc.args[0]) if exc.args else "resource"
         return 404, {"error": {"code": code, "message": f"{code}: {resource_id}"}}
     if isinstance(exc, ValueError):
@@ -86,9 +107,11 @@ def map_domain_error(exc: Exception, *, path: str = "") -> tuple[int, dict[str, 
 
 def _serialize_data(value: Any) -> Any:
     if hasattr(value, "model_dump"):
-        return value.model_dump(by_alias=True)
+        return value.model_dump(by_alias=True, mode="json")
     if isinstance(value, list):
         return [_serialize_data(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _serialize_data(item) for key, item in value.items()}
     return value
 
 
@@ -245,10 +268,10 @@ def _resolve_outbox_event_context(service: OpsGraphAppService, event) -> dict[st
     }
 
 
-def create_fastapi_app(service: OpsGraphAppService):
+def create_fastapi_app(service: OpsGraphAppService, *, route_authorizer=None):
     ap = load_shared_agent_platform()
     try:
-        from fastapi import FastAPI, Header, Request
+        from fastapi import Cookie, Depends, FastAPI, Header, Request, Response
         from fastapi.responses import JSONResponse, StreamingResponse
     except ImportError as exc:
         errors_module = importlib.import_module(f"{ap.__name__}.errors")
@@ -256,7 +279,25 @@ def create_fastapi_app(service: OpsGraphAppService):
 
         raise FastAPIUnavailableError("fastapi is not installed") from exc
 
-    app = FastAPI(title="OpsGraph API")
+    if hasattr(service, "close"):
+        @asynccontextmanager
+        async def lifespan(app_instance):
+            app_instance.state.opsgraph_service = service
+            try:
+                yield
+            finally:
+                service.close()
+
+        app = FastAPI(title="OpsGraph API", lifespan=lifespan)
+        app.state.opsgraph_service = service
+    else:
+        app = FastAPI(title="OpsGraph API")
+
+    auth_service = getattr(service, "auth_service", None)
+    route_authorizer = (
+        route_authorizer
+        or (auth_service.build_authorizer() if auth_service is not None else HeaderOpsGraphAuthorizer())
+    )
 
     @app.exception_handler(KeyError)
     def handle_key_error(request: Request, exc: KeyError):
@@ -268,6 +309,152 @@ def create_fastapi_app(service: OpsGraphAppService):
         status_code, payload = map_domain_error(exc, path=str(request.url.path))
         return JSONResponse(status_code=status_code, content=payload)
 
+    @app.exception_handler(OpsGraphAuthorizationError)
+    def handle_authorization_error(request: Request, exc: OpsGraphAuthorizationError):
+        del request
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
+    def _build_access_dependency(required_role: str):
+        def require_access(
+            authorization: str | None = Header(default=None, alias="Authorization"),
+            organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
+            user_id: str | None = Header(default=None, alias="X-User-Id"),
+            user_role: str | None = Header(default=None, alias="X-User-Role"),
+        ):
+            return route_authorizer.authorize(
+                required_role=required_role,
+                authorization=authorization,
+                organization_id=organization_id,
+                user_id=user_id,
+                user_role=user_role,
+            )
+
+        return require_access
+
+    require_viewer_access = _build_access_dependency("viewer")
+    require_operator_access = _build_access_dependency("operator")
+    require_product_admin_access = _build_access_dependency("product_admin")
+
+    if auth_service is not None:
+        @app.post("/api/v1/auth/session")
+        def create_auth_session(
+            command: SessionCreateCommand,
+            user_agent: str | None = Header(default=None, alias="User-Agent"),
+            request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        ) -> JSONResponse:
+            issue = auth_service.create_session(
+                command,
+                ip_address=None,
+                user_agent=user_agent,
+            )
+            response = JSONResponse(
+                status_code=200,
+                content=success_envelope(issue.response, request_id=request_id),
+            )
+            response.set_cookie(
+                key="refresh_token",
+                value=issue.refresh_token,
+                httponly=True,
+                samesite="lax",
+                secure=False,
+                path="/",
+            )
+            return response
+
+        @app.post("/api/v1/auth/session/refresh")
+        def refresh_auth_session(
+            refresh_token: str | None = Cookie(default=None, alias="refresh_token"),
+            user_agent: str | None = Header(default=None, alias="User-Agent"),
+            request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        ) -> JSONResponse:
+            issue = auth_service.refresh_session(
+                refresh_token,
+                ip_address=None,
+                user_agent=user_agent,
+            )
+            response = JSONResponse(
+                status_code=200,
+                content=success_envelope(issue.response, request_id=request_id),
+            )
+            response.set_cookie(
+                key="refresh_token",
+                value=issue.refresh_token,
+                httponly=True,
+                samesite="lax",
+                secure=False,
+                path="/",
+            )
+            return response
+
+        @app.delete("/api/v1/auth/session/current", response_class=Response)
+        def revoke_current_auth_session(
+            auth_context=Depends(require_viewer_access),
+        ) -> Response:
+            auth_service.revoke_session(auth_context.session_id)
+            response = Response(status_code=204)
+            response.delete_cookie("refresh_token", path="/")
+            return response
+
+        @app.get("/api/v1/me")
+        @app.get("/api/v1/auth/me")
+        def get_current_user(
+            request_id: str | None = Header(default=None, alias="X-Request-Id"),
+            auth_context=Depends(require_viewer_access),
+        ) -> dict[str, object]:
+            return success_envelope(
+                auth_service.get_current_user(auth_context),
+                request_id=request_id,
+            )
+
+        @app.get("/api/v1/auth/memberships")
+        def list_auth_memberships(
+            status: str | None = None,
+            request_id: str | None = Header(default=None, alias="X-Request-Id"),
+            auth_context=Depends(require_product_admin_access),
+        ) -> dict[str, object]:
+            return success_envelope(
+                auth_service.list_memberships(
+                    auth_context.organization_id,
+                    status=status,
+                ),
+                request_id=request_id,
+            )
+
+        @app.post("/api/v1/auth/memberships")
+        def provision_auth_membership(
+            command: MembershipProvisionCommand,
+            request_id: str | None = Header(default=None, alias="X-Request-Id"),
+            auth_context=Depends(require_product_admin_access),
+        ) -> dict[str, object]:
+            return success_envelope(
+                auth_service.provision_membership(
+                    auth_context.organization_id,
+                    command,
+                    actor_user_id=auth_context.user_id,
+                ),
+                request_id=request_id,
+            )
+
+        @app.patch("/api/v1/auth/memberships/{membership_id}")
+        def update_auth_membership(
+            membership_id: str,
+            command: MembershipUpdateCommand,
+            request_id: str | None = Header(default=None, alias="X-Request-Id"),
+            auth_context=Depends(require_product_admin_access),
+        ) -> dict[str, object]:
+            return success_envelope(
+                auth_service.update_membership(
+                    auth_context.organization_id,
+                    membership_id,
+                    command,
+                    actor_user_id=auth_context.user_id,
+                ),
+                request_id=request_id,
+            )
+
     @app.get("/health")
     def health(
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
@@ -277,7 +464,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             request_id=request_id,
         )
 
-    @app.get("/api/v1/workflows")
+    @app.get("/api/v1/workflows", dependencies=[Depends(require_viewer_access)])
     def list_workflows(
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
     ) -> dict[str, object]:
@@ -286,7 +473,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             request_id=request_id,
         )
 
-    @app.get("/api/v1/workflows/{workflow_run_id}")
+    @app.get("/api/v1/workflows/{workflow_run_id}", dependencies=[Depends(require_viewer_access)])
     def get_workflow_state(
         workflow_run_id: str,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
@@ -296,7 +483,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             request_id=request_id,
         )
 
-    @app.get("/api/v1/events/stream")
+    @app.get("/api/v1/events/stream", dependencies=[Depends(require_viewer_access)])
     async def stream_events(
         workspace_id: str,
         topic: str | None = None,
@@ -395,7 +582,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             workflow_run_id=response.workflow_run_id,
         )
 
-    @app.get("/api/v1/opsgraph/incidents")
+    @app.get("/api/v1/opsgraph/incidents", dependencies=[Depends(require_viewer_access)])
     def list_incidents(
         workspace_id: str,
         status: str | None = None,
@@ -419,7 +606,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             has_more=has_more,
         )
 
-    @app.get("/api/v1/opsgraph/incidents/{incident_id}")
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}", dependencies=[Depends(require_viewer_access)])
     def get_incident_workspace(
         incident_id: str,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
@@ -429,7 +616,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             request_id=request_id,
         )
 
-    @app.get("/api/v1/opsgraph/incidents/{incident_id}/hypotheses")
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/hypotheses", dependencies=[Depends(require_viewer_access)])
     def list_hypotheses(
         incident_id: str,
         cursor: str | None = None,
@@ -451,9 +638,16 @@ def create_fastapi_app(service: OpsGraphAppService):
         command: FactCreateCommand,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.add_fact(incident_id, command, idempotency_key=idempotency_key),
+            service.add_fact(
+                incident_id,
+                command,
+                idempotency_key=idempotency_key,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
@@ -464,9 +658,17 @@ def create_fastapi_app(service: OpsGraphAppService):
         command: FactRetractCommand,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.retract_fact(incident_id, fact_id, command, idempotency_key=idempotency_key),
+            service.retract_fact(
+                incident_id,
+                fact_id,
+                command,
+                idempotency_key=idempotency_key,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
@@ -476,9 +678,16 @@ def create_fastapi_app(service: OpsGraphAppService):
         command: SeverityOverrideCommand,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.override_severity(incident_id, command, idempotency_key=idempotency_key),
+            service.override_severity(
+                incident_id,
+                command,
+                idempotency_key=idempotency_key,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
@@ -489,6 +698,7 @@ def create_fastapi_app(service: OpsGraphAppService):
         command: HypothesisDecisionCommand,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
     ) -> dict[str, object]:
         return success_envelope(
             service.decide_hypothesis(
@@ -496,11 +706,13 @@ def create_fastapi_app(service: OpsGraphAppService):
                 hypothesis_id,
                 command,
                 idempotency_key=idempotency_key,
+                auth_context=auth_context,
+                request_id=request_id,
             ),
             request_id=request_id,
         )
 
-    @app.get("/api/v1/opsgraph/incidents/{incident_id}/recommendations")
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/recommendations", dependencies=[Depends(require_viewer_access)])
     def list_recommendations(
         incident_id: str,
         cursor: str | None = None,
@@ -516,7 +728,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             has_more=has_more,
         )
 
-    @app.get("/api/v1/opsgraph/incidents/{incident_id}/approval-tasks")
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/approval-tasks", dependencies=[Depends(require_viewer_access)])
     def list_approval_tasks(
         incident_id: str,
         cursor: str | None = None,
@@ -532,13 +744,56 @@ def create_fastapi_app(service: OpsGraphAppService):
             has_more=has_more,
         )
 
-    @app.get("/api/v1/opsgraph/approval-tasks/{approval_task_id}")
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/audit-logs")
+    def list_audit_logs(
+        incident_id: str,
+        action_type: str | None = None,
+        actor_user_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = DEFAULT_PAGE_LIMIT,
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
+    ) -> dict[str, object]:
+        del auth_context
+        items = service.list_audit_logs(
+            incident_id,
+            action_type=action_type,
+            actor_user_id=actor_user_id,
+        )
+        page_items, next_cursor, has_more = paginate_collection(items, cursor=cursor, limit=limit)
+        return success_envelope(
+            page_items,
+            request_id=request_id,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
+
+    @app.get("/api/v1/opsgraph/approval-tasks/{approval_task_id}", dependencies=[Depends(require_viewer_access)])
     def get_approval_task(
         approval_task_id: str,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
     ) -> dict[str, object]:
         return success_envelope(
             service.get_approval_task(approval_task_id),
+            request_id=request_id,
+        )
+
+    @app.post("/api/v1/opsgraph/approvals/{approval_task_id}/decision")
+    def decide_approval_task(
+        approval_task_id: str,
+        command: ApprovalDecisionCommand,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
+    ) -> dict[str, object]:
+        return success_envelope(
+            service.decide_approval_task(
+                approval_task_id,
+                command,
+                idempotency_key=idempotency_key,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
@@ -549,6 +804,7 @@ def create_fastapi_app(service: OpsGraphAppService):
         command: RecommendationDecisionCommand,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
     ) -> dict[str, object]:
         return success_envelope(
             service.decide_recommendation(
@@ -556,11 +812,13 @@ def create_fastapi_app(service: OpsGraphAppService):
                 recommendation_id,
                 command,
                 idempotency_key=idempotency_key,
+                auth_context=auth_context,
+                request_id=request_id,
             ),
             request_id=request_id,
         )
 
-    @app.get("/api/v1/opsgraph/incidents/{incident_id}/comms")
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/comms", dependencies=[Depends(require_viewer_access)])
     def list_comms(
         incident_id: str,
         channel: str | None = None,
@@ -585,9 +843,17 @@ def create_fastapi_app(service: OpsGraphAppService):
         command: CommsPublishCommand,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.publish_comms(incident_id, draft_id, command, idempotency_key=idempotency_key),
+            service.publish_comms(
+                incident_id,
+                draft_id,
+                command,
+                idempotency_key=idempotency_key,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
@@ -597,9 +863,16 @@ def create_fastapi_app(service: OpsGraphAppService):
         command: ResolveIncidentCommand,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.resolve_incident(incident_id, command, idempotency_key=idempotency_key),
+            service.resolve_incident(
+                incident_id,
+                command,
+                idempotency_key=idempotency_key,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
@@ -609,13 +882,20 @@ def create_fastapi_app(service: OpsGraphAppService):
         command: CloseIncidentCommand,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.close_incident(incident_id, command, idempotency_key=idempotency_key),
+            service.close_incident(
+                incident_id,
+                command,
+                idempotency_key=idempotency_key,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
-    @app.get("/api/v1/opsgraph/incidents/{incident_id}/postmortem")
+    @app.get("/api/v1/opsgraph/incidents/{incident_id}/postmortem", dependencies=[Depends(require_viewer_access)])
     def get_postmortem(
         incident_id: str,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
@@ -631,13 +911,20 @@ def create_fastapi_app(service: OpsGraphAppService):
         command: PostmortemFinalizeCommand,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_operator_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.finalize_postmortem(incident_id, command, idempotency_key=idempotency_key),
+            service.finalize_postmortem(
+                incident_id,
+                command,
+                idempotency_key=idempotency_key,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
-    @app.get("/api/v1/opsgraph/postmortems")
+    @app.get("/api/v1/opsgraph/postmortems", dependencies=[Depends(require_viewer_access)])
     def list_postmortems(
         workspace_id: str,
         incident_id: str | None = None,
@@ -659,7 +946,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             has_more=has_more,
         )
 
-    @app.get("/api/v1/opsgraph/replay-cases")
+    @app.get("/api/v1/opsgraph/replay-cases", dependencies=[Depends(require_viewer_access)])
     def list_replay_cases(
         workspace_id: str,
         incident_id: str | None = None,
@@ -676,7 +963,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             has_more=has_more,
         )
 
-    @app.get("/api/v1/opsgraph/replay-cases/{replay_case_id}")
+    @app.get("/api/v1/opsgraph/replay-cases/{replay_case_id}", dependencies=[Depends(require_viewer_access)])
     def get_replay_case(
         replay_case_id: str,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
@@ -686,7 +973,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             request_id=request_id,
         )
 
-    @app.post("/api/v1/opsgraph/incidents/respond")
+    @app.post("/api/v1/opsgraph/incidents/respond", dependencies=[Depends(require_operator_access)])
     def respond_to_incident(
         command: IncidentResponseCommand,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
@@ -696,7 +983,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             request_id=request_id,
         )
 
-    @app.post("/api/v1/opsgraph/incidents/retrospective")
+    @app.post("/api/v1/opsgraph/incidents/retrospective", dependencies=[Depends(require_operator_access)])
     def build_retrospective(
         command: RetrospectiveCommand,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
@@ -711,15 +998,21 @@ def create_fastapi_app(service: OpsGraphAppService):
         command: ReplayRunCommand,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_product_admin_access),
     ) -> dict[str, object]:
-        response = service.start_replay_run(command, idempotency_key=idempotency_key)
+        response = service.start_replay_run(
+            command,
+            idempotency_key=idempotency_key,
+            auth_context=auth_context,
+            request_id=request_id,
+        )
         return success_envelope(
             response,
             request_id=request_id,
             workflow_run_id=response.workflow_run_id,
         )
 
-    @app.get("/api/v1/opsgraph/replays")
+    @app.get("/api/v1/opsgraph/replays", dependencies=[Depends(require_viewer_access)])
     def list_replays(
         workspace_id: str,
         incident_id: str | None = None,
@@ -738,7 +1031,7 @@ def create_fastapi_app(service: OpsGraphAppService):
             has_more=has_more,
         )
 
-    @app.get("/api/v1/opsgraph/replays/baselines")
+    @app.get("/api/v1/opsgraph/replays/baselines", dependencies=[Depends(require_viewer_access)])
     def list_replay_baselines(
         workspace_id: str,
         incident_id: str | None = None,
@@ -759,9 +1052,14 @@ def create_fastapi_app(service: OpsGraphAppService):
     def capture_replay_baseline(
         command: ReplayBaselineCaptureCommand,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_product_admin_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.capture_replay_baseline(command),
+            service.capture_replay_baseline(
+                command,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
@@ -770,9 +1068,15 @@ def create_fastapi_app(service: OpsGraphAppService):
         replay_run_id: str,
         command: ReplayStatusCommand,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_product_admin_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.update_replay_status(replay_run_id, command),
+            service.update_replay_status(
+                replay_run_id,
+                command,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
@@ -780,9 +1084,14 @@ def create_fastapi_app(service: OpsGraphAppService):
     def execute_replay_run(
         replay_run_id: str,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_product_admin_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.execute_replay_run(replay_run_id),
+            service.execute_replay_run(
+                replay_run_id,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
@@ -791,13 +1100,19 @@ def create_fastapi_app(service: OpsGraphAppService):
         replay_run_id: str,
         command: ReplayEvaluationCommand,
         request_id: str | None = Header(default=None, alias="X-Request-Id"),
+        auth_context=Depends(require_product_admin_access),
     ) -> dict[str, object]:
         return success_envelope(
-            service.evaluate_replay_run(replay_run_id, command),
+            service.evaluate_replay_run(
+                replay_run_id,
+                command,
+                auth_context=auth_context,
+                request_id=request_id,
+            ),
             request_id=request_id,
         )
 
-    @app.get("/api/v1/opsgraph/replays/reports")
+    @app.get("/api/v1/opsgraph/replays/reports", dependencies=[Depends(require_viewer_access)])
     def list_replay_reports(
         workspace_id: str,
         incident_id: str | None = None,

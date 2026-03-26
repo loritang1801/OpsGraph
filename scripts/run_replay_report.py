@@ -34,6 +34,19 @@ def main() -> None:
                     "replay": replay.model_dump(mode="json"),
                     "executed": executed.model_dump(mode="json"),
                     "report": report.model_dump(mode="json"),
+                    "summary": {
+                        "status": report.status,
+                        "score": report.score,
+                        "mismatch_count": report.mismatch_count,
+                        "node_match_rate": report.node_match_rate,
+                        "latency_regression_count": report.latency_regression_count,
+                        "latency_improvement_count": report.latency_improvement_count,
+                    },
+                    "artifacts": {
+                        "json_report_path": report.report_artifact_path,
+                        "markdown_report_path": report.markdown_report_path,
+                        "csv_report_path": report.csv_report_path,
+                    },
                 },
                 indent=2,
             )

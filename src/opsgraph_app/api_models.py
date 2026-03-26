@@ -81,6 +81,28 @@ class TimelineEventSummary(OpsGraphModel):
     event_id: str = Field(serialization_alias="id")
     kind: str
     summary: str
+    actor_type: str = "system"
+    actor_id: str | None = None
+    subject_type: str | None = None
+    subject_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class AuditLogSummary(OpsGraphModel):
+    audit_log_id: str = Field(serialization_alias="id")
+    incident_id: str
+    action_type: str
+    actor_type: str = "system"
+    actor_user_id: str | None = None
+    actor_role: str | None = None
+    session_id: str | None = None
+    request_id: str | None = None
+    idempotency_key: str | None = None
+    subject_type: str | None = None
+    subject_id: str | None = None
+    request_payload: dict[str, Any] = Field(default_factory=dict)
+    result_payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
 
@@ -180,9 +202,18 @@ class ReplayEvaluationSummary(OpsGraphModel):
     mismatch_count: int
     matched_node_count: int = 0
     mismatched_node_count: int = 0
+    node_match_rate: float = 0.0
     bundle_mismatch_count: int = 0
+    version_mismatch_count: int = 0
     summary_mismatch_count: int = 0
+    missing_baseline_node_count: int = 0
+    missing_replay_node_count: int = 0
+    state_mismatch_count: int = 0
+    checkpoint_mismatch_count: int = 0
     latency_regression_count: int = 0
+    latency_improvement_count: int = 0
+    latency_regression_total_ms: int = 0
+    avg_latency_delta_ms: float | None = None
     max_latency_delta_ms: int | None = None
     mismatches: list[str] = Field(default_factory=list)
     baseline_final_state: str | None = None
@@ -192,6 +223,7 @@ class ReplayEvaluationSummary(OpsGraphModel):
     node_diffs: list[ReplayNodeDiffSummary] = Field(default_factory=list)
     report_artifact_path: str | None = None
     markdown_report_path: str | None = None
+    csv_report_path: str | None = None
     created_at: datetime
 
 
@@ -277,6 +309,21 @@ class CommsPublishResponse(OpsGraphModel):
     draft_id: str
     status: str
     published_message_ref: str | None = None
+
+
+class ApprovalDecisionCommand(OpsGraphModel):
+    decision: Literal["approve", "reject"]
+    comment: str = ""
+    execute_recommendation: bool = False
+    publish_linked_drafts: bool = False
+    linked_draft_ids: list[str] = Field(default_factory=list)
+    expected_fact_set_version: int | None = None
+
+
+class ApprovalDecisionResponse(OpsGraphModel):
+    approval_task: ApprovalTaskSummary
+    recommendation: RecommendationDecisionResponse | None = None
+    published_drafts: list[CommsPublishResponse] = Field(default_factory=list)
 
 
 class RecommendationDecisionCommand(OpsGraphModel):

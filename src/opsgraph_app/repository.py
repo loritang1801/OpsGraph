@@ -11,6 +11,9 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .api_models import (
+    AuditLogSummary,
+    ApprovalDecisionCommand,
+    ApprovalDecisionResponse,
     ApprovalTaskSummary,
     AlertIngestResponse,
     CommsDraftSummary,
@@ -59,6 +62,14 @@ class OpsGraphRepository(Protocol):
 
     def get_incident_workspace(self, incident_id: str) -> IncidentWorkspaceResponse: ...
 
+    def list_audit_logs(
+        self,
+        incident_id: str,
+        *,
+        action_type: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> list[AuditLogSummary]: ...
+
     def list_hypotheses(self, incident_id: str) -> list[HypothesisSummary]: ...
 
     def list_recommendations(self, incident_id: str) -> list[RecommendationSummary]: ...
@@ -74,6 +85,12 @@ class OpsGraphRepository(Protocol):
     def list_approval_tasks(self, incident_id: str) -> list[ApprovalTaskSummary]: ...
 
     def get_approval_task(self, approval_task_id: str) -> ApprovalTaskSummary: ...
+
+    def decide_approval_task(
+        self,
+        approval_task_id: str,
+        command: ApprovalDecisionCommand,
+    ) -> ApprovalDecisionResponse: ...
 
     def get_incident_event_context(self, incident_id: str) -> dict[str, object]: ...
 
@@ -130,7 +147,13 @@ class OpsGraphRepository(Protocol):
         status: str | None = None,
     ) -> list[PostmortemSummary]: ...
 
-    def start_replay_run(self, command: ReplayRunCommand) -> ReplayRunSummary: ...
+    def start_replay_run(
+        self,
+        command: ReplayRunCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> ReplayRunSummary: ...
 
     def list_replays(
         self,
@@ -144,7 +167,13 @@ class OpsGraphRepository(Protocol):
 
     def get_replay_case(self, replay_case_id: str) -> ReplayCaseDetail: ...
 
-    def update_replay_status(self, replay_run_id: str, command: ReplayStatusCommand) -> ReplayRunSummary: ...
+    def update_replay_status(
+        self,
+        replay_run_id: str,
+        command: ReplayStatusCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+    ) -> ReplayRunSummary: ...
 
     def get_replay_run(self, replay_run_id: str) -> ReplayRunSummary: ...
 
@@ -158,6 +187,9 @@ class OpsGraphRepository(Protocol):
         workflow_run_id: str | None = None,
         current_state: str | None = None,
         error_message: str | None = None,
+        actor_context: dict[str, object] | None = None,
+        audit_action_type: str | None = None,
+        request_payload: dict[str, object] | None = None,
     ) -> ReplayRunSummary: ...
 
     def get_incident_execution_seed(self, incident_id: str) -> dict[str, object]: ...
@@ -172,6 +204,7 @@ class OpsGraphRepository(Protocol):
         final_state: str,
         checkpoint_seq: int,
         node_summaries: list[ReplayNodeSummary],
+        actor_context: dict[str, object] | None = None,
     ) -> ReplayBaselineSummary: ...
 
     def list_replay_baselines(self, workspace_id: str, incident_id: str | None = None) -> list[ReplayBaselineSummary]: ...
@@ -193,6 +226,7 @@ class OpsGraphRepository(Protocol):
         replay_checkpoint_seq: int | None = None,
         node_diffs: list[ReplayNodeDiffSummary] | None = None,
         report_artifact_path: str | None = None,
+        actor_context: dict[str, object] | None = None,
     ) -> ReplayEvaluationSummary: ...
 
     def list_replay_evaluations(
@@ -208,6 +242,8 @@ class OpsGraphRepository(Protocol):
         report_id: str,
         *,
         report_artifact_path: str,
+        actor_context: dict[str, object] | None = None,
+        request_payload: dict[str, object] | None = None,
     ) -> ReplayEvaluationSummary: ...
 
     def record_incident_response_result(
@@ -337,6 +373,30 @@ class TimelineEventRow(Base):
     incident_id: Mapped[str] = mapped_column(String(255), index=True)
     kind: Mapped[str] = mapped_column(String(50))
     summary: Mapped[str] = mapped_column(Text)
+    actor_type: Mapped[str] = mapped_column(String(30), default="system")
+    actor_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    subject_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    subject_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class AuditLogRow(Base):
+    __tablename__ = "opsgraph_audit_log"
+
+    audit_log_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    action_type: Mapped[str] = mapped_column(String(100), index=True)
+    actor_type: Mapped[str] = mapped_column(String(30), default="system")
+    actor_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    actor_role: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    subject_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    subject_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    request_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_payload: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
 
 
@@ -584,10 +644,95 @@ class SqlAlchemyOpsGraphRepository:
                     incident_id="incident-1",
                     kind="signal_ingested",
                     summary="Grafana alert detected elevated 5xx errors on checkout-api.",
+                    actor_type="webhook",
+                    subject_type="signal",
+                    subject_id="signal-1",
+                    payload={"source": "grafana", "status": "firing"},
                     created_at=created_at,
                 )
             )
             session.add(SignalIndexRow(correlation_key="checkout-api:high-error-rate", incident_id="incident-1"))
+
+    @staticmethod
+    def _json_payload(value: dict[str, object] | None) -> dict[str, object]:
+        if not isinstance(value, dict):
+            return {}
+        return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+    def _timeline_event(
+        self,
+        *,
+        incident_id: str,
+        kind: str,
+        summary: str,
+        actor_type: str = "system",
+        actor_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        payload: dict[str, object] | None = None,
+        created_at: datetime | None = None,
+    ) -> TimelineEventRow:
+        return TimelineEventRow(
+            event_id=f"timeline-{uuid4().hex[:8]}",
+            incident_id=incident_id,
+            kind=kind,
+            summary=summary,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            payload=self._json_payload(payload),
+            created_at=created_at or datetime.now(UTC),
+        )
+
+    def _append_audit_log(
+        self,
+        session: Session,
+        *,
+        incident_id: str,
+        action_type: str,
+        subject_type: str | None,
+        subject_id: str | None,
+        actor_context: dict[str, object] | None,
+        idempotency_key: str | None,
+        request_payload: dict[str, object] | None,
+        result_payload: dict[str, object] | None,
+    ) -> None:
+        context = actor_context or {}
+        session.add(
+            AuditLogRow(
+                audit_log_id=f"audit-{uuid4().hex[:10]}",
+                incident_id=incident_id,
+                action_type=action_type,
+                actor_type=str(context.get("actor_type") or "system"),
+                actor_user_id=(
+                    str(context["actor_user_id"])
+                    if context.get("actor_user_id") is not None
+                    else None
+                ),
+                actor_role=(
+                    str(context["actor_role"])
+                    if context.get("actor_role") is not None
+                    else None
+                ),
+                session_id=(
+                    str(context["session_id"])
+                    if context.get("session_id") is not None
+                    else None
+                ),
+                request_id=(
+                    str(context["request_id"])
+                    if context.get("request_id") is not None
+                    else None
+                ),
+                idempotency_key=idempotency_key,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                request_payload=self._json_payload(request_payload),
+                result_payload=self._json_payload(result_payload),
+                created_at=self._utcnow_naive(),
+            )
+        )
 
     @staticmethod
     def _to_incident(row: IncidentRow) -> IncidentSummary:
@@ -672,6 +817,30 @@ class SqlAlchemyOpsGraphRepository:
             event_id=row.event_id,
             kind=row.kind,
             summary=row.summary,
+            actor_type=row.actor_type,
+            actor_id=row.actor_id,
+            subject_type=row.subject_type,
+            subject_id=row.subject_id,
+            payload=dict(row.payload or {}),
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_audit_log(row: AuditLogRow) -> AuditLogSummary:
+        return AuditLogSummary(
+            audit_log_id=row.audit_log_id,
+            incident_id=row.incident_id,
+            action_type=row.action_type,
+            actor_type=row.actor_type,
+            actor_user_id=row.actor_user_id,
+            actor_role=row.actor_role,
+            session_id=row.session_id,
+            request_id=row.request_id,
+            idempotency_key=row.idempotency_key,
+            subject_type=row.subject_type,
+            subject_id=row.subject_id,
+            request_payload=dict(row.request_payload or {}),
+            result_payload=dict(row.result_payload or {}),
             created_at=row.created_at,
         )
 
@@ -774,6 +943,10 @@ class SqlAlchemyOpsGraphRepository:
         metrics = SqlAlchemyOpsGraphRepository._replay_evaluation_metrics(
             node_diffs=node_diffs,
             report_artifact_path=row.report_artifact_path,
+            baseline_final_state=row.baseline_final_state,
+            replay_final_state=row.replay_final_state,
+            baseline_checkpoint_seq=row.baseline_checkpoint_seq,
+            replay_checkpoint_seq=row.replay_checkpoint_seq,
         )
         return ReplayEvaluationSummary(
             report_id=row.report_id,
@@ -785,9 +958,18 @@ class SqlAlchemyOpsGraphRepository:
             mismatch_count=len(row.mismatches),
             matched_node_count=metrics["matched_node_count"],
             mismatched_node_count=metrics["mismatched_node_count"],
+            node_match_rate=metrics["node_match_rate"],
             bundle_mismatch_count=metrics["bundle_mismatch_count"],
+            version_mismatch_count=metrics["version_mismatch_count"],
             summary_mismatch_count=metrics["summary_mismatch_count"],
+            missing_baseline_node_count=metrics["missing_baseline_node_count"],
+            missing_replay_node_count=metrics["missing_replay_node_count"],
+            state_mismatch_count=metrics["state_mismatch_count"],
+            checkpoint_mismatch_count=metrics["checkpoint_mismatch_count"],
             latency_regression_count=metrics["latency_regression_count"],
+            latency_improvement_count=metrics["latency_improvement_count"],
+            latency_regression_total_ms=metrics["latency_regression_total_ms"],
+            avg_latency_delta_ms=metrics["avg_latency_delta_ms"],
             max_latency_delta_ms=metrics["max_latency_delta_ms"],
             mismatches=row.mismatches,
             baseline_final_state=row.baseline_final_state,
@@ -797,6 +979,7 @@ class SqlAlchemyOpsGraphRepository:
             node_diffs=node_diffs,
             report_artifact_path=row.report_artifact_path,
             markdown_report_path=metrics["markdown_report_path"],
+            csv_report_path=metrics["csv_report_path"],
             created_at=row.created_at,
         )
 
@@ -875,6 +1058,25 @@ class SqlAlchemyOpsGraphRepository:
                 timeline=[self._to_timeline(row) for row in timeline_rows],
             )
 
+    def list_audit_logs(
+        self,
+        incident_id: str,
+        *,
+        action_type: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> list[AuditLogSummary]:
+        with self.session_factory() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            stmt = select(AuditLogRow).where(AuditLogRow.incident_id == incident_id)
+            if action_type is not None:
+                stmt = stmt.where(AuditLogRow.action_type == action_type)
+            if actor_user_id is not None:
+                stmt = stmt.where(AuditLogRow.actor_user_id == actor_user_id)
+            rows = session.scalars(stmt.order_by(AuditLogRow.created_at.desc())).all()
+            return [self._to_audit_log(row) for row in rows]
+
     def list_hypotheses(self, incident_id: str) -> list[HypothesisSummary]:
         with self.session_factory() as session:
             rows = session.scalars(
@@ -927,6 +1129,183 @@ class SqlAlchemyOpsGraphRepository:
             if row is None:
                 raise KeyError(approval_task_id)
             return self._to_approval_task(row)
+
+    def decide_approval_task(
+        self,
+        approval_task_id: str,
+        command: ApprovalDecisionCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> ApprovalDecisionResponse:
+        with self.session_factory.begin() as session:
+            approval_row = session.get(ApprovalTaskRow, approval_task_id)
+            if approval_row is None:
+                raise KeyError(approval_task_id)
+            incident_row = session.get(IncidentRow, approval_row.incident_id)
+            if incident_row is None:
+                raise KeyError(approval_row.incident_id)
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
+
+            recommendation_row = None
+            if approval_row.recommendation_id is not None:
+                recommendation_row = session.get(RecommendationRow, approval_row.recommendation_id)
+                if (
+                    recommendation_row is None
+                    or recommendation_row.incident_id != approval_row.incident_id
+                    or recommendation_row.approval_task_id != approval_task_id
+                ):
+                    raise ValueError("APPROVAL_STATUS_CONFLICT")
+
+            linked_draft_rows = session.scalars(
+                select(CommsDraftRow)
+                .where(CommsDraftRow.incident_id == approval_row.incident_id)
+                .where(CommsDraftRow.approval_task_id == approval_task_id)
+                .order_by(CommsDraftRow.draft_id.asc())
+            ).all()
+            linked_drafts_by_id = {row.draft_id: row for row in linked_draft_rows}
+
+            if approval_row.status in {"approved", "rejected"}:
+                raise ValueError("APPROVAL_STATUS_CONFLICT")
+            if command.decision != "approve" and (
+                command.execute_recommendation
+                or command.publish_linked_drafts
+                or bool(command.linked_draft_ids)
+            ):
+                raise ValueError("APPROVAL_DECISION_INVALID")
+            if command.execute_recommendation and recommendation_row is None:
+                raise ValueError("APPROVAL_EXECUTION_REQUIRES_RECOMMENDATION")
+
+            selected_draft_rows: list[CommsDraftRow] = []
+            if command.publish_linked_drafts or command.linked_draft_ids:
+                if command.decision != "approve":
+                    raise ValueError("APPROVAL_DECISION_INVALID")
+                if command.expected_fact_set_version is None:
+                    raise ValueError("APPROVAL_PUBLISH_FACT_SET_REQUIRED")
+                if command.publish_linked_drafts and not command.linked_draft_ids:
+                    selected_draft_rows = list(linked_draft_rows)
+                else:
+                    invalid_draft_ids = [
+                        draft_id for draft_id in command.linked_draft_ids if draft_id not in linked_drafts_by_id
+                    ]
+                    if invalid_draft_ids:
+                        raise ValueError("APPROVAL_DRAFT_SELECTION_INVALID")
+                    selected_draft_rows = [linked_drafts_by_id[draft_id] for draft_id in command.linked_draft_ids]
+                if not selected_draft_rows:
+                    raise ValueError("APPROVAL_DRAFT_SELECTION_INVALID")
+
+            now = self._utcnow_naive()
+            approval_row.status = "approved" if command.decision == "approve" else "rejected"
+            approval_row.comment = command.comment or None
+            approval_row.updated_at = now
+
+            recommendation_response = None
+            if recommendation_row is not None:
+                if recommendation_row.status != "pending_approval":
+                    raise ValueError("RECOMMENDATION_STATUS_CONFLICT")
+                recommendation_row.status = (
+                    "executed"
+                    if command.decision == "approve" and command.execute_recommendation
+                    else ("approved" if command.decision == "approve" else "rejected")
+                )
+                recommendation_row.updated_at = now
+                recommendation_response = RecommendationDecisionResponse(
+                    recommendation_id=recommendation_row.recommendation_id,
+                    status=recommendation_row.status,
+                    approval_task_id=approval_row.approval_task_id,
+                    approval_status=approval_row.status,
+                )
+                session.add(
+                    self._timeline_event(
+                        incident_id=approval_row.incident_id,
+                        kind="recommendation_updated",
+                        summary=f"{recommendation_row.title}: {recommendation_row.status}",
+                        actor_type=timeline_actor_type,
+                        actor_id=timeline_actor_id,
+                        subject_type="recommendation",
+                        subject_id=recommendation_row.recommendation_id,
+                        payload={
+                            "status": recommendation_row.status,
+                            "approval_task_id": approval_row.approval_task_id,
+                        },
+                    )
+                )
+
+            published_drafts: list[CommsPublishResponse] = []
+            for draft_row in selected_draft_rows:
+                if draft_row.status == "published":
+                    raise ValueError("COMM_DRAFT_ALREADY_PUBLISHED")
+                if (
+                    incident_row.current_fact_set_version != draft_row.fact_set_version
+                    or draft_row.fact_set_version != command.expected_fact_set_version
+                ):
+                    raise ValueError("COMM_DRAFT_STALE_FACT_SET")
+                draft_row.status = "published"
+                draft_row.published_message_ref = f"{draft_row.channel}-msg-{uuid4().hex[:8]}"
+                draft_row.updated_at = now
+                published_drafts.append(
+                    CommsPublishResponse(
+                        draft_id=draft_row.draft_id,
+                        status=draft_row.status,
+                        published_message_ref=draft_row.published_message_ref,
+                    )
+                )
+                session.add(
+                    self._timeline_event(
+                        incident_id=approval_row.incident_id,
+                        kind="comms_published",
+                        summary=f"Published {draft_row.channel} draft {draft_row.draft_id}.",
+                        actor_type=timeline_actor_type,
+                        actor_id=timeline_actor_id,
+                        subject_type="comms_draft",
+                        subject_id=draft_row.draft_id,
+                        payload={
+                            "channel": draft_row.channel,
+                            "status": draft_row.status,
+                            "published_message_ref": draft_row.published_message_ref,
+                        },
+                    )
+                )
+
+            incident_row.updated_at = now
+            response = ApprovalDecisionResponse(
+                approval_task=self._to_approval_task(approval_row),
+                recommendation=recommendation_response,
+                published_drafts=published_drafts,
+            )
+            session.add(
+                self._timeline_event(
+                    incident_id=approval_row.incident_id,
+                    kind="approval_updated",
+                    summary=f"Approval task {approval_task_id}: {approval_row.status}",
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="approval_task",
+                    subject_id=approval_task_id,
+                    payload={
+                        "status": approval_row.status,
+                        "recommendation_id": approval_row.recommendation_id,
+                        "published_draft_ids": [item.draft_id for item in published_drafts],
+                    },
+                )
+            )
+            self._append_audit_log(
+                session,
+                incident_id=approval_row.incident_id,
+                action_type="approval.decide",
+                subject_type="approval_task",
+                subject_id=approval_task_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=response.model_dump(mode="json"),
+            )
+            return response
 
     def get_incident_event_context(self, incident_id: str) -> dict[str, object]:
         with self.session_factory() as session:
@@ -1013,13 +1392,26 @@ class SqlAlchemyOpsGraphRepository:
             workflow_run_id=workflow_run_id,
         )
 
-    def add_fact(self, incident_id: str, command: FactCreateCommand) -> FactMutationResponse:
+    def add_fact(
+        self,
+        incident_id: str,
+        command: FactCreateCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> FactMutationResponse:
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
                 raise KeyError(incident_id)
             if incident_row.current_fact_set_version != command.expected_fact_set_version:
                 raise ValueError("FACT_VERSION_CONFLICT")
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             incident_row.current_fact_set_version += 1
             incident_row.updated_at = self._utcnow_naive()
             fact_id = f"fact-{uuid4().hex[:8]}"
@@ -1035,22 +1427,48 @@ class SqlAlchemyOpsGraphRepository:
                     created_at=datetime.now(UTC),
                 )
             )
-            session.add(
-                TimelineEventRow(
-                    event_id=f"timeline-{uuid4().hex[:8]}",
-                    incident_id=incident_id,
-                    kind="fact_confirmed",
-                    summary=command.statement,
-                    created_at=datetime.now(UTC),
-                )
-            )
-            return FactMutationResponse(
+            response = FactMutationResponse(
                 fact_id=fact_id,
                 status="confirmed",
                 current_fact_set_version=incident_row.current_fact_set_version,
             )
+            session.add(
+                self._timeline_event(
+                    incident_id=incident_id,
+                    kind="fact_confirmed",
+                    summary=command.statement,
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="incident_fact",
+                    subject_id=fact_id,
+                    payload={
+                        "fact_type": command.fact_type,
+                        "fact_set_version": incident_row.current_fact_set_version,
+                    },
+                )
+            )
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="incident.add_fact",
+                subject_type="incident_fact",
+                subject_id=fact_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=response.model_dump(mode="json"),
+            )
+            return response
 
-    def retract_fact(self, incident_id: str, fact_id: str, command: FactRetractCommand) -> FactMutationResponse:
+    def retract_fact(
+        self,
+        incident_id: str,
+        fact_id: str,
+        command: FactRetractCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> FactMutationResponse:
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
             fact_row = session.get(IncidentFactRow, fact_id)
@@ -1058,26 +1476,54 @@ class SqlAlchemyOpsGraphRepository:
                 raise KeyError(fact_id)
             if incident_row.current_fact_set_version != command.expected_fact_set_version:
                 raise ValueError("FACT_VERSION_CONFLICT")
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             incident_row.current_fact_set_version += 1
             incident_row.updated_at = self._utcnow_naive()
             fact_row.status = "retracted"
             fact_row.fact_set_version = incident_row.current_fact_set_version
-            session.add(
-                TimelineEventRow(
-                    event_id=f"timeline-{uuid4().hex[:8]}",
-                    incident_id=incident_id,
-                    kind="fact_retracted",
-                    summary=command.reason,
-                    created_at=datetime.now(UTC),
-                )
-            )
-            return FactMutationResponse(
+            response = FactMutationResponse(
                 fact_id=fact_id,
                 status="retracted",
                 current_fact_set_version=incident_row.current_fact_set_version,
             )
+            session.add(
+                self._timeline_event(
+                    incident_id=incident_id,
+                    kind="fact_retracted",
+                    summary=command.reason,
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="incident_fact",
+                    subject_id=fact_id,
+                    payload={"fact_set_version": incident_row.current_fact_set_version},
+                )
+            )
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="incident.retract_fact",
+                subject_type="incident_fact",
+                subject_id=fact_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=response.model_dump(mode="json"),
+            )
+            return response
 
-    def override_severity(self, incident_id: str, command: SeverityOverrideCommand) -> IncidentSummary:
+    def override_severity(
+        self,
+        incident_id: str,
+        command: SeverityOverrideCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> IncidentSummary:
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
@@ -1087,24 +1533,48 @@ class SqlAlchemyOpsGraphRepository:
                 command.expected_updated_at,
             ):
                 raise ValueError("CONFLICT_STALE_RESOURCE")
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             incident_row.severity = command.severity
             incident_row.updated_at = self._utcnow_naive()
+            response = self._to_incident(incident_row)
             session.add(
-                TimelineEventRow(
-                    event_id=f"timeline-{uuid4().hex[:8]}",
+                self._timeline_event(
                     incident_id=incident_id,
                     kind="severity_changed",
                     summary=command.reason,
-                    created_at=datetime.now(UTC),
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="incident",
+                    subject_id=incident_id,
+                    payload={"severity": command.severity},
                 )
             )
-            return self._to_incident(incident_row)
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="incident.override_severity",
+                subject_type="incident",
+                subject_id=incident_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=response.model_dump(mode="json"),
+            )
+            return response
 
     def decide_hypothesis(
         self,
         incident_id: str,
         hypothesis_id: str,
         command: HypothesisDecisionCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
     ) -> HypothesisDecisionResponse:
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
@@ -1118,28 +1588,52 @@ class SqlAlchemyOpsGraphRepository:
                 raise ValueError("CONFLICT_STALE_RESOURCE")
             if hypothesis_row.status in {"accepted", "rejected"}:
                 raise ValueError("HYPOTHESIS_STATUS_CONFLICT")
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             hypothesis_row.status = "accepted" if command.decision == "accept" else "rejected"
             hypothesis_row.updated_at = self._utcnow_naive()
             incident_row.updated_at = self._utcnow_naive()
-            session.add(
-                TimelineEventRow(
-                    event_id=f"timeline-{uuid4().hex[:8]}",
-                    incident_id=incident_id,
-                    kind="hypothesis_resolved",
-                    summary=f"{hypothesis_row.title}: {hypothesis_row.status}",
-                    created_at=datetime.now(UTC),
-                )
-            )
-            return HypothesisDecisionResponse(
+            response = HypothesisDecisionResponse(
                 hypothesis_id=hypothesis_id,
                 status=hypothesis_row.status,
             )
+            session.add(
+                self._timeline_event(
+                    incident_id=incident_id,
+                    kind="hypothesis_resolved",
+                    summary=f"{hypothesis_row.title}: {hypothesis_row.status}",
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="hypothesis",
+                    subject_id=hypothesis_id,
+                    payload={"status": hypothesis_row.status},
+                )
+            )
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="incident.decide_hypothesis",
+                subject_type="hypothesis",
+                subject_id=hypothesis_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=response.model_dump(mode="json"),
+            )
+            return response
 
     def decide_recommendation(
         self,
         incident_id: str,
         recommendation_id: str,
         command: RecommendationDecisionCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
     ) -> RecommendationDecisionResponse:
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
@@ -1188,6 +1682,12 @@ class SqlAlchemyOpsGraphRepository:
                     recommendation_row.approval_task_id = command.approval_task_id
                 elif approval_row is not None:
                     recommendation_row.approval_task_id = approval_row.approval_task_id
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             if command.decision == "approve":
                 if recommendation_row.status == "approved":
                     raise ValueError("RECOMMENDATION_STATUS_CONFLICT")
@@ -1212,27 +1712,49 @@ class SqlAlchemyOpsGraphRepository:
                 recommendation_row.status = "executed"
             recommendation_row.updated_at = self._utcnow_naive()
             incident_row.updated_at = self._utcnow_naive()
-            session.add(
-                TimelineEventRow(
-                    event_id=f"timeline-{uuid4().hex[:8]}",
-                    incident_id=incident_id,
-                    kind="recommendation_updated",
-                    summary=f"{recommendation_row.title}: {recommendation_row.status}",
-                    created_at=datetime.now(UTC),
-                )
-            )
-            return RecommendationDecisionResponse(
+            response = RecommendationDecisionResponse(
                 recommendation_id=recommendation_id,
                 status=recommendation_row.status,
                 approval_task_id=recommendation_row.approval_task_id,
                 approval_status=approval_row.status if approval_row is not None else None,
             )
+            session.add(
+                self._timeline_event(
+                    incident_id=incident_id,
+                    kind="recommendation_updated",
+                    summary=f"{recommendation_row.title}: {recommendation_row.status}",
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="recommendation",
+                    subject_id=recommendation_id,
+                    payload={
+                        "status": recommendation_row.status,
+                        "approval_task_id": recommendation_row.approval_task_id,
+                        "approval_status": approval_row.status if approval_row is not None else None,
+                    },
+                )
+            )
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="incident.decide_recommendation",
+                subject_type="recommendation",
+                subject_id=recommendation_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=response.model_dump(mode="json"),
+            )
+            return response
 
     def publish_comms(
         self,
         incident_id: str,
         draft_id: str,
         command: CommsPublishCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
     ) -> CommsPublishResponse:
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
@@ -1255,26 +1777,58 @@ class SqlAlchemyOpsGraphRepository:
                     or approval_row.status != "approved"
                 ):
                     raise ValueError("APPROVAL_REQUIRED")
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             comms_row.status = "published"
             comms_row.published_message_ref = f"{comms_row.channel}-msg-{uuid4().hex[:8]}"
             comms_row.updated_at = self._utcnow_naive()
             incident_row.updated_at = self._utcnow_naive()
-            session.add(
-                TimelineEventRow(
-                    event_id=f"timeline-{uuid4().hex[:8]}",
-                    incident_id=incident_id,
-                    kind="comms_published",
-                    summary=f"Published {comms_row.channel} draft {draft_id}.",
-                    created_at=datetime.now(UTC),
-                )
-            )
-            return CommsPublishResponse(
+            response = CommsPublishResponse(
                 draft_id=draft_id,
                 status=comms_row.status,
                 published_message_ref=comms_row.published_message_ref,
             )
+            session.add(
+                self._timeline_event(
+                    incident_id=incident_id,
+                    kind="comms_published",
+                    summary=f"Published {comms_row.channel} draft {draft_id}.",
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="comms_draft",
+                    subject_id=draft_id,
+                    payload={
+                        "channel": comms_row.channel,
+                        "status": comms_row.status,
+                        "published_message_ref": comms_row.published_message_ref,
+                    },
+                )
+            )
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="incident.publish_comms",
+                subject_type="comms_draft",
+                subject_id=draft_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=response.model_dump(mode="json"),
+            )
+            return response
 
-    def resolve_incident(self, incident_id: str, command: ResolveIncidentCommand) -> IncidentSummary:
+    def resolve_incident(
+        self,
+        incident_id: str,
+        command: ResolveIncidentCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> IncidentSummary:
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
@@ -1298,20 +1852,48 @@ class SqlAlchemyOpsGraphRepository:
             )
             if len(confirmed_root_cause_fact_ids) != len(set(command.root_cause_fact_ids)):
                 raise ValueError("ROOT_CAUSE_FACT_REQUIRED")
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             incident_row.incident_status = "resolved"
             incident_row.updated_at = self._utcnow_naive()
+            response = self._to_incident(incident_row)
             session.add(
-                TimelineEventRow(
-                    event_id=f"timeline-{uuid4().hex[:8]}",
+                self._timeline_event(
                     incident_id=incident_id,
                     kind="incident_resolved",
                     summary=command.resolution_summary,
-                    created_at=datetime.now(UTC),
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="incident",
+                    subject_id=incident_id,
+                    payload={"root_cause_fact_ids": list(command.root_cause_fact_ids)},
                 )
             )
-            return self._to_incident(incident_row)
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="incident.resolve",
+                subject_type="incident",
+                subject_id=incident_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=response.model_dump(mode="json"),
+            )
+            return response
 
-    def close_incident(self, incident_id: str, command: CloseIncidentCommand) -> IncidentSummary:
+    def close_incident(
+        self,
+        incident_id: str,
+        command: CloseIncidentCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> IncidentSummary:
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
@@ -1323,18 +1905,39 @@ class SqlAlchemyOpsGraphRepository:
                 raise ValueError("CONFLICT_STALE_RESOURCE")
             if incident_row.incident_status != "resolved":
                 raise ValueError("INCIDENT_NOT_RESOLVED")
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             incident_row.incident_status = "closed"
             incident_row.updated_at = self._utcnow_naive()
+            response = self._to_incident(incident_row)
             session.add(
-                TimelineEventRow(
-                    event_id=f"timeline-{uuid4().hex[:8]}",
+                self._timeline_event(
                     incident_id=incident_id,
                     kind="incident_closed",
                     summary=command.close_reason,
-                    created_at=datetime.now(UTC),
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="incident",
+                    subject_id=incident_id,
+                    payload={"status": "closed"},
                 )
             )
-            return self._to_incident(incident_row)
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="incident.close",
+                subject_type="incident",
+                subject_id=incident_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=response.model_dump(mode="json"),
+            )
+            return response
 
     def get_postmortem(self, incident_id: str) -> PostmortemSummary:
         with self.session_factory() as session:
@@ -1345,7 +1948,14 @@ class SqlAlchemyOpsGraphRepository:
                 raise KeyError(incident_id)
             return self._to_postmortem(row)
 
-    def finalize_postmortem(self, incident_id: str, command: PostmortemFinalizeCommand) -> PostmortemSummary:
+    def finalize_postmortem(
+        self,
+        incident_id: str,
+        command: PostmortemFinalizeCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> PostmortemSummary:
         with self.session_factory.begin() as session:
             postmortem_row = session.scalars(
                 select(PostmortemRow).where(PostmortemRow.incident_id == incident_id).limit(1)
@@ -1358,6 +1968,12 @@ class SqlAlchemyOpsGraphRepository:
             ):
                 raise ValueError("CONFLICT_STALE_RESOURCE")
             now = self._utcnow_naive()
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             if postmortem_row.status != "final":
                 postmortem_row.status = "final"
                 postmortem_row.finalized_by_user_id = command.finalized_by_user_id
@@ -1381,7 +1997,34 @@ class SqlAlchemyOpsGraphRepository:
                         artifact_metadata["finalized_at"] = now.isoformat()
                         artifact_row.metadata_payload = artifact_metadata
                         artifact_row.updated_at = now
-            return self._to_postmortem(postmortem_row)
+            response = self._to_postmortem(postmortem_row)
+            session.add(
+                self._timeline_event(
+                    incident_id=incident_id,
+                    kind="postmortem_finalized",
+                    summary=f"Postmortem {postmortem_row.postmortem_id} finalized.",
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="postmortem",
+                    subject_id=postmortem_row.postmortem_id,
+                    payload={
+                        "status": postmortem_row.status,
+                        "finalized_by_user_id": postmortem_row.finalized_by_user_id,
+                    },
+                )
+            )
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="postmortem.finalize",
+                subject_type="postmortem",
+                subject_id=postmortem_row.postmortem_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=response.model_dump(mode="json"),
+            )
+            return response
 
     def list_postmortems(
         self,
@@ -1403,7 +2046,13 @@ class SqlAlchemyOpsGraphRepository:
             rows = session.scalars(stmt.order_by(PostmortemRow.updated_at.desc())).all()
             return [self._to_postmortem(row) for row in rows]
 
-    def start_replay_run(self, command: ReplayRunCommand) -> ReplayRunSummary:
+    def start_replay_run(
+        self,
+        command: ReplayRunCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+    ) -> ReplayRunSummary:
         replay_run_id = f"replay-{uuid4().hex[:8]}"
         created_at = self._utcnow_naive()
         with self.session_factory.begin() as session:
@@ -1419,6 +2068,12 @@ class SqlAlchemyOpsGraphRepository:
                     raise KeyError(command.replay_case_id)
                 incident_id = replay_case_row.incident_id
                 ops_workspace_id = replay_case_row.ops_workspace_id
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             session.add(
                 ReplayRunRow(
                     replay_run_id=replay_run_id,
@@ -1432,6 +2087,41 @@ class SqlAlchemyOpsGraphRepository:
                     error_message=None,
                     created_at=created_at,
                 )
+            )
+            replay = ReplayRunSummary(
+                replay_run_id=replay_run_id,
+                incident_id=incident_id,
+                status="queued",
+                model_bundle_version=command.model_bundle_version,
+                replay_case_id=command.replay_case_id,
+                created_at=created_at,
+            )
+            session.add(
+                self._timeline_event(
+                    incident_id=incident_id,
+                    kind="replay_run_queued",
+                    summary=f"Replay {replay_run_id} queued",
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="replay_run",
+                    subject_id=replay_run_id,
+                    payload={
+                        "status": replay.status,
+                        "model_bundle_version": replay.model_bundle_version,
+                        "replay_case_id": replay.replay_case_id,
+                    },
+                )
+            )
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="replay.start_run",
+                subject_type="replay_run",
+                subject_id=replay_run_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=replay.model_dump(mode="json"),
             )
         return ReplayRunSummary(
             replay_run_id=replay_run_id,
@@ -1499,6 +2189,7 @@ class SqlAlchemyOpsGraphRepository:
         final_state: str,
         checkpoint_seq: int,
         node_summaries: list[ReplayNodeSummary],
+        actor_context: dict[str, object] | None = None,
     ) -> ReplayBaselineSummary:
         baseline_id = f"baseline-{uuid4().hex[:8]}"
         created_at = self._utcnow_naive()
@@ -1506,6 +2197,12 @@ class SqlAlchemyOpsGraphRepository:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
                 raise KeyError(incident_id)
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
             session.add(
                 ReplayBaselineRow(
                     baseline_id=baseline_id,
@@ -1519,6 +2216,48 @@ class SqlAlchemyOpsGraphRepository:
                     node_summaries=[item.model_dump(mode="json") for item in node_summaries],
                     created_at=created_at,
                 )
+            )
+            baseline = ReplayBaselineSummary(
+                baseline_id=baseline_id,
+                incident_id=incident_id,
+                workflow_run_id=workflow_run_id,
+                model_bundle_version=model_bundle_version,
+                workflow_type=workflow_type,
+                final_state=final_state,
+                checkpoint_seq=checkpoint_seq,
+                node_summaries=node_summaries,
+                created_at=created_at,
+            )
+            session.add(
+                self._timeline_event(
+                    incident_id=incident_id,
+                    kind="replay_baseline_captured",
+                    summary=f"Replay baseline {baseline_id} captured",
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="replay_baseline",
+                    subject_id=baseline_id,
+                    payload={
+                        "workflow_run_id": workflow_run_id,
+                        "model_bundle_version": model_bundle_version,
+                        "checkpoint_seq": checkpoint_seq,
+                    },
+                )
+            )
+            self._append_audit_log(
+                session,
+                incident_id=incident_id,
+                action_type="replay.capture_baseline",
+                subject_type="replay_baseline",
+                subject_id=baseline_id,
+                actor_context=actor_context,
+                idempotency_key=None,
+                request_payload={
+                    "incident_id": incident_id,
+                    "workflow_run_id": workflow_run_id,
+                    "model_bundle_version": model_bundle_version,
+                },
+                result_payload=baseline.model_dump(mode="json"),
             )
         return ReplayBaselineSummary(
             baseline_id=baseline_id,
@@ -1562,13 +2301,18 @@ class SqlAlchemyOpsGraphRepository:
         replay_checkpoint_seq: int | None = None,
         node_diffs: list[ReplayNodeDiffSummary] | None = None,
         report_artifact_path: str | None = None,
-        ) -> ReplayEvaluationSummary:
+        actor_context: dict[str, object] | None = None,
+    ) -> ReplayEvaluationSummary:
         report_id = f"report-{uuid4().hex[:8]}"
         created_at = self._utcnow_naive()
         node_diffs = node_diffs or []
         metrics = self._replay_evaluation_metrics(
             node_diffs=node_diffs,
             report_artifact_path=report_artifact_path,
+            baseline_final_state=baseline_final_state,
+            replay_final_state=replay_final_state,
+            baseline_checkpoint_seq=baseline_checkpoint_seq,
+            replay_checkpoint_seq=replay_checkpoint_seq,
         )
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
@@ -1603,9 +2347,18 @@ class SqlAlchemyOpsGraphRepository:
             mismatch_count=len(mismatches),
             matched_node_count=metrics["matched_node_count"],
             mismatched_node_count=metrics["mismatched_node_count"],
+            node_match_rate=metrics["node_match_rate"],
             bundle_mismatch_count=metrics["bundle_mismatch_count"],
+            version_mismatch_count=metrics["version_mismatch_count"],
             summary_mismatch_count=metrics["summary_mismatch_count"],
+            missing_baseline_node_count=metrics["missing_baseline_node_count"],
+            missing_replay_node_count=metrics["missing_replay_node_count"],
+            state_mismatch_count=metrics["state_mismatch_count"],
+            checkpoint_mismatch_count=metrics["checkpoint_mismatch_count"],
             latency_regression_count=metrics["latency_regression_count"],
+            latency_improvement_count=metrics["latency_improvement_count"],
+            latency_regression_total_ms=metrics["latency_regression_total_ms"],
+            avg_latency_delta_ms=metrics["avg_latency_delta_ms"],
             max_latency_delta_ms=metrics["max_latency_delta_ms"],
             mismatches=mismatches,
             baseline_final_state=baseline_final_state,
@@ -1615,6 +2368,7 @@ class SqlAlchemyOpsGraphRepository:
             node_diffs=node_diffs,
             report_artifact_path=report_artifact_path,
             markdown_report_path=metrics["markdown_report_path"],
+            csv_report_path=metrics["csv_report_path"],
             created_at=created_at,
         )
 
@@ -1646,48 +2400,134 @@ class SqlAlchemyOpsGraphRepository:
         report_id: str,
         *,
         report_artifact_path: str,
+        actor_context: dict[str, object] | None = None,
+        request_payload: dict[str, object] | None = None,
     ) -> ReplayEvaluationSummary:
         with self.session_factory.begin() as session:
             row = session.get(ReplayEvaluationRow, report_id)
             if row is None:
                 raise KeyError(report_id)
             row.report_artifact_path = report_artifact_path
-            return self._to_replay_evaluation(row)
+            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+            timeline_actor_id = (
+                str(actor_context["actor_user_id"])
+                if actor_context is not None and actor_context.get("actor_user_id") is not None
+                else None
+            )
+            evaluation = self._to_replay_evaluation(row)
+            session.add(
+                self._timeline_event(
+                    incident_id=row.incident_id,
+                    kind="replay_evaluated",
+                    summary=f"Replay evaluation {report_id}: {row.status}",
+                    actor_type=timeline_actor_type,
+                    actor_id=timeline_actor_id,
+                    subject_type="replay_evaluation",
+                    subject_id=report_id,
+                    payload={
+                        "replay_run_id": row.replay_run_id,
+                        "baseline_id": row.baseline_id,
+                        "status": row.status,
+                        "score": row.score,
+                    },
+                )
+            )
+            self._append_audit_log(
+                session,
+                incident_id=row.incident_id,
+                action_type="replay.evaluate",
+                subject_type="replay_evaluation",
+                subject_id=report_id,
+                actor_context=actor_context,
+                idempotency_key=None,
+                request_payload=request_payload,
+                result_payload=evaluation.model_dump(mode="json"),
+            )
+            return evaluation
 
     @staticmethod
     def _replay_evaluation_metrics(
         *,
         node_diffs: list[ReplayNodeDiffSummary],
         report_artifact_path: str | None,
+        baseline_final_state: str | None = None,
+        replay_final_state: str | None = None,
+        baseline_checkpoint_seq: int | None = None,
+        replay_checkpoint_seq: int | None = None,
     ) -> dict[str, object]:
         matched_node_count = sum(1 for item in node_diffs if item.matched)
         mismatched_node_count = sum(1 for item in node_diffs if not item.matched)
+        node_match_rate = round((matched_node_count / len(node_diffs)), 4) if node_diffs else 0.0
         bundle_mismatch_count = sum(
             1 for item in node_diffs if any("bundle mismatch" in reason for reason in item.mismatch_reasons)
+        )
+        version_mismatch_count = sum(
+            1 for item in node_diffs if any("version mismatch" in reason for reason in item.mismatch_reasons)
         )
         summary_mismatch_count = sum(
             1 for item in node_diffs if any("summary mismatch" in reason for reason in item.mismatch_reasons)
         )
+        missing_baseline_node_count = sum(
+            1 for item in node_diffs if any("missing baseline node" in reason for reason in item.mismatch_reasons)
+        )
+        missing_replay_node_count = sum(
+            1 for item in node_diffs if any("missing replay node" in reason for reason in item.mismatch_reasons)
+        )
+        state_mismatch_count = (
+            int(baseline_final_state != replay_final_state)
+            if baseline_final_state is not None or replay_final_state is not None
+            else 0
+        )
+        checkpoint_mismatch_count = (
+            int(baseline_checkpoint_seq != replay_checkpoint_seq)
+            if baseline_checkpoint_seq is not None or replay_checkpoint_seq is not None
+            else 0
+        )
         latency_regression_count = sum(
             1 for item in node_diffs if item.latency_delta_ms is not None and item.latency_delta_ms > 0
         )
+        latency_improvement_count = sum(
+            1 for item in node_diffs if item.latency_delta_ms is not None and item.latency_delta_ms < 0
+        )
         latency_deltas = [item.latency_delta_ms for item in node_diffs if item.latency_delta_ms is not None]
+        positive_latency_deltas = [item for item in latency_deltas if item > 0]
         markdown_report_path = (
             str(Path(report_artifact_path).with_suffix(".md"))
+            if report_artifact_path is not None
+            else None
+        )
+        csv_report_path = (
+            str(Path(report_artifact_path).with_suffix(".csv"))
             if report_artifact_path is not None
             else None
         )
         return {
             "matched_node_count": matched_node_count,
             "mismatched_node_count": mismatched_node_count,
+            "node_match_rate": node_match_rate,
             "bundle_mismatch_count": bundle_mismatch_count,
+            "version_mismatch_count": version_mismatch_count,
             "summary_mismatch_count": summary_mismatch_count,
+            "missing_baseline_node_count": missing_baseline_node_count,
+            "missing_replay_node_count": missing_replay_node_count,
+            "state_mismatch_count": state_mismatch_count,
+            "checkpoint_mismatch_count": checkpoint_mismatch_count,
             "latency_regression_count": latency_regression_count,
+            "latency_improvement_count": latency_improvement_count,
+            "latency_regression_total_ms": sum(positive_latency_deltas),
+            "avg_latency_delta_ms": round(sum(latency_deltas) / len(latency_deltas), 4) if latency_deltas else None,
             "max_latency_delta_ms": max(latency_deltas) if latency_deltas else None,
             "markdown_report_path": markdown_report_path,
+            "csv_report_path": csv_report_path,
         }
 
-    def update_replay_status(self, replay_run_id: str, command: ReplayStatusCommand) -> ReplayRunSummary:
+    def update_replay_status(
+        self,
+        replay_run_id: str,
+        command: ReplayStatusCommand,
+        *,
+        actor_context: dict[str, object] | None = None,
+    ) -> ReplayRunSummary:
         with self.session_factory.begin() as session:
             replay_row = session.get(ReplayRunRow, replay_run_id)
             if replay_row is None:
@@ -1696,20 +2536,45 @@ class SqlAlchemyOpsGraphRepository:
                 if replay_row.status == command.status:
                     return self._to_replay(replay_row)
                 raise ValueError("REPLAY_STATUS_CONFLICT")
+            previous_status = replay_row.status
             replay_row.status = command.status
             incident_row = session.get(IncidentRow, replay_row.incident_id)
             if incident_row is not None:
                 incident_row.updated_at = self._utcnow_naive()
+                timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+                timeline_actor_id = (
+                    str(actor_context["actor_user_id"])
+                    if actor_context is not None and actor_context.get("actor_user_id") is not None
+                    else None
+                )
                 session.add(
-                    TimelineEventRow(
-                        event_id=f"timeline-{uuid4().hex[:8]}",
+                    self._timeline_event(
                         incident_id=incident_row.incident_id,
                         kind="replay_status_updated",
                         summary=f"Replay {replay_run_id} -> {command.status}",
-                        created_at=datetime.now(UTC),
+                        actor_type=timeline_actor_type,
+                        actor_id=timeline_actor_id,
+                        subject_type="replay_run",
+                        subject_id=replay_run_id,
+                        payload={
+                            "previous_status": previous_status,
+                            "status": command.status,
+                        },
                     )
                 )
-            return self._to_replay(replay_row)
+            replay = self._to_replay(replay_row)
+            self._append_audit_log(
+                session,
+                incident_id=replay_row.incident_id,
+                action_type="replay.update_status",
+                subject_type="replay_run",
+                subject_id=replay_run_id,
+                actor_context=actor_context,
+                idempotency_key=None,
+                request_payload=command.model_dump(mode="json"),
+                result_payload=replay.model_dump(mode="json"),
+            )
+            return replay
 
     def mark_replay_execution(
         self,
@@ -1719,6 +2584,9 @@ class SqlAlchemyOpsGraphRepository:
         workflow_run_id: str | None = None,
         current_state: str | None = None,
         error_message: str | None = None,
+        actor_context: dict[str, object] | None = None,
+        audit_action_type: str | None = None,
+        request_payload: dict[str, object] | None = None,
     ) -> ReplayRunSummary:
         with self.session_factory.begin() as session:
             replay_row = session.get(ReplayRunRow, replay_run_id)
@@ -1728,6 +2596,7 @@ class SqlAlchemyOpsGraphRepository:
                 if replay_row.status == status:
                     return self._to_replay(replay_row)
                 raise ValueError("REPLAY_STATUS_CONFLICT")
+            previous_status = replay_row.status
             replay_row.status = status
             replay_row.workflow_run_id = workflow_run_id
             replay_row.current_state = current_state
@@ -1735,16 +2604,44 @@ class SqlAlchemyOpsGraphRepository:
             incident_row = session.get(IncidentRow, replay_row.incident_id)
             if incident_row is not None:
                 incident_row.updated_at = self._utcnow_naive()
+                timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+                timeline_actor_id = (
+                    str(actor_context["actor_user_id"])
+                    if actor_context is not None and actor_context.get("actor_user_id") is not None
+                    else None
+                )
                 session.add(
-                    TimelineEventRow(
-                        event_id=f"timeline-{uuid4().hex[:8]}",
+                    self._timeline_event(
                         incident_id=incident_row.incident_id,
                         kind="replay_status_updated",
                         summary=f"Replay {replay_run_id} -> {status}",
-                        created_at=datetime.now(UTC),
+                        actor_type=timeline_actor_type,
+                        actor_id=timeline_actor_id,
+                        subject_type="replay_run",
+                        subject_id=replay_run_id,
+                        payload={
+                            "previous_status": previous_status,
+                            "status": status,
+                            "workflow_run_id": workflow_run_id,
+                            "current_state": current_state,
+                            "error_message": error_message,
+                        },
                     )
                 )
-            return self._to_replay(replay_row)
+            replay = self._to_replay(replay_row)
+            if audit_action_type is not None:
+                self._append_audit_log(
+                    session,
+                    incident_id=replay_row.incident_id,
+                    action_type=audit_action_type,
+                    subject_type="replay_run",
+                    subject_id=replay_run_id,
+                    actor_context=actor_context,
+                    idempotency_key=None,
+                    request_payload=request_payload,
+                    result_payload=replay.model_dump(mode="json"),
+                )
+            return replay
 
     def get_incident_execution_seed(self, incident_id: str) -> dict[str, object]:
         with self.session_factory() as session:

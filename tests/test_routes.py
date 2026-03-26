@@ -79,6 +79,24 @@ class OpsGraphRouteErrorMappingTests(unittest.TestCase):
         self.assertEqual(status_code, 503)
         self.assertEqual(payload["error"]["code"], "REPLAY_EVALUATION_UNAVAILABLE")
 
+    def test_maps_approval_task_not_found_to_404(self) -> None:
+        status_code, payload = map_domain_error(
+            KeyError("approval-task-404"),
+            path="/api/v1/opsgraph/approvals/approval-task-404/decision",
+        )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "APPROVAL_TASK_NOT_FOUND")
+
+    def test_maps_approval_input_errors_to_422(self) -> None:
+        status_code, payload = map_domain_error(
+            ValueError("APPROVAL_PUBLISH_FACT_SET_REQUIRED"),
+            path="/api/v1/opsgraph/approvals/approval-task-1/decision",
+        )
+
+        self.assertEqual(status_code, 422)
+        self.assertEqual(payload["error"]["code"], "APPROVAL_PUBLISH_FACT_SET_REQUIRED")
+
     def test_maps_idempotency_conflict_to_409(self) -> None:
         status_code, payload = map_domain_error(
             ValueError("IDEMPOTENCY_CONFLICT"),

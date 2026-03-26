@@ -7,6 +7,8 @@ from typing import Any, TypeVar
 from uuid import uuid4
 
 from .api_models import (
+    ApprovalDecisionCommand,
+    ApprovalDecisionResponse,
     ApprovalTaskSummary,
     AlertIngestCommand,
     AlertIngestResponse,
@@ -59,6 +61,7 @@ class OpsGraphAppService:
         workflow_api_service,
         repository: OpsGraphRepository,
         runtime_stores=None,
+        auth_service=None,
         shared_platform=None,
         workflow_registry=None,
         prompt_service=None,
@@ -67,6 +70,7 @@ class OpsGraphAppService:
         self.workflow_api_service = workflow_api_service
         self.repository = repository
         self.runtime_stores = runtime_stores
+        self.auth_service = auth_service
         self.shared_platform = shared_platform
         self.workflow_registry = workflow_registry
         self.prompt_service = prompt_service
@@ -88,6 +92,21 @@ class OpsGraphAppService:
     def _hash_request_payload(payload: dict[str, Any]) -> str:
         normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _build_audit_context(auth_context, *, request_id: str | None = None) -> dict[str, object] | None:
+        if auth_context is None and request_id is None:
+            return None
+        context: dict[str, object] = {
+            "actor_type": "system" if auth_context is None else "user",
+        }
+        if auth_context is not None:
+            context["actor_user_id"] = getattr(auth_context, "user_id", None)
+            context["actor_role"] = getattr(auth_context, "role", None)
+            context["session_id"] = getattr(auth_context, "session_id", None)
+        if request_id is not None:
+            context["request_id"] = request_id
+        return context
 
     def _load_idempotent_response(self, *, operation: str, idempotency_key: str | None, request_payload: dict[str, Any], model_type):
         if not idempotency_key:
@@ -154,11 +173,108 @@ class OpsGraphAppService:
     ) -> list[CommsDraftSummary]:
         return self.repository.list_comms(incident_id, channel=channel, status=status)
 
+    def list_audit_logs(
+        self,
+        incident_id: str,
+        *,
+        action_type: str | None = None,
+        actor_user_id: str | None = None,
+    ):
+        return self.repository.list_audit_logs(
+            incident_id,
+            action_type=action_type,
+            actor_user_id=actor_user_id,
+        )
+
     def list_approval_tasks(self, incident_id: str) -> list[ApprovalTaskSummary]:
         return self.repository.list_approval_tasks(incident_id)
 
     def get_approval_task(self, approval_task_id: str) -> ApprovalTaskSummary:
         return self.repository.get_approval_task(approval_task_id)
+
+    def decide_approval_task(
+        self,
+        approval_task_id: str,
+        command: ApprovalDecisionCommand | dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
+    ) -> ApprovalDecisionResponse:
+        if isinstance(command, dict):
+            command = ApprovalDecisionCommand.model_validate(command)
+        if command.decision != "approve" and (
+            command.execute_recommendation
+            or command.publish_linked_drafts
+            or bool(command.linked_draft_ids)
+        ):
+            raise ValueError("APPROVAL_DECISION_INVALID")
+        if (command.publish_linked_drafts or command.linked_draft_ids) and command.expected_fact_set_version is None:
+            raise ValueError("APPROVAL_PUBLISH_FACT_SET_REQUIRED")
+        request_payload = {"approval_task_id": approval_task_id, **command.model_dump(mode="json")}
+        cached = self._load_idempotent_response(
+            operation="opsgraph.decide_approval_task",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            model_type=ApprovalDecisionResponse,
+        )
+        if cached is not None:
+            return cached
+        response = self.repository.decide_approval_task(
+            approval_task_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
+        approval_task = response.approval_task
+        self._emit_incident_event(
+            incident_id=approval_task.incident_id,
+            event_name="opsgraph.approval.updated",
+            aggregate_type="approval_task",
+            aggregate_id=approval_task.approval_task_id,
+            node_name="approval_task_decided",
+            payload={
+                "approval_task_id": approval_task.approval_task_id,
+                "status": approval_task.status,
+                "recommendation_id": approval_task.recommendation_id,
+                "decision": command.decision,
+                "published_draft_ids": [item.draft_id for item in response.published_drafts],
+            },
+        )
+        if response.recommendation is not None:
+            self._emit_incident_event(
+                incident_id=approval_task.incident_id,
+                event_name="opsgraph.incident.updated",
+                aggregate_type="runbook_recommendation",
+                aggregate_id=response.recommendation.recommendation_id,
+                node_name="recommendation_orchestrated",
+                payload={
+                    "recommendation_id": response.recommendation.recommendation_id,
+                    "recommendation_status": response.recommendation.status,
+                    "approval_task_id": response.recommendation.approval_task_id,
+                },
+            )
+        for published_draft in response.published_drafts:
+            self._emit_incident_event(
+                incident_id=approval_task.incident_id,
+                event_name="opsgraph.comms.updated",
+                aggregate_type="comms_draft",
+                aggregate_id=published_draft.draft_id,
+                node_name="comms_published_from_approval",
+                payload={
+                    "draft_id": published_draft.draft_id,
+                    "comms_status": published_draft.status,
+                    "published_message_ref": published_draft.published_message_ref,
+                    "approval_task_id": approval_task.approval_task_id,
+                },
+            )
+        self._store_idempotent_response(
+            operation="opsgraph.decide_approval_task",
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response.model_dump(mode="json"),
+        )
+        return response
 
     def add_fact(
         self,
@@ -166,6 +282,8 @@ class OpsGraphAppService:
         command: FactCreateCommand | dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> FactMutationResponse:
         if isinstance(command, dict):
             command = FactCreateCommand.model_validate(command)
@@ -178,7 +296,12 @@ class OpsGraphAppService:
         )
         if cached is not None:
             return cached
-        response = self.repository.add_fact(incident_id, command)
+        response = self.repository.add_fact(
+            incident_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
         self._emit_incident_event(
             incident_id=incident_id,
             event_name="opsgraph.incident.updated",
@@ -205,6 +328,8 @@ class OpsGraphAppService:
         command: FactRetractCommand | dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> FactMutationResponse:
         if isinstance(command, dict):
             command = FactRetractCommand.model_validate(command)
@@ -217,7 +342,13 @@ class OpsGraphAppService:
         )
         if cached is not None:
             return cached
-        response = self.repository.retract_fact(incident_id, fact_id, command)
+        response = self.repository.retract_fact(
+            incident_id,
+            fact_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
         self._emit_incident_event(
             incident_id=incident_id,
             event_name="opsgraph.incident.updated",
@@ -243,6 +374,8 @@ class OpsGraphAppService:
         command: SeverityOverrideCommand | dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> IncidentSummary:
         if isinstance(command, dict):
             command = SeverityOverrideCommand.model_validate(command)
@@ -255,7 +388,12 @@ class OpsGraphAppService:
         )
         if cached is not None:
             return cached
-        response = self.repository.override_severity(incident_id, command)
+        response = self.repository.override_severity(
+            incident_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
         self._emit_incident_event(
             incident_id=incident_id,
             event_name="opsgraph.incident.updated",
@@ -282,6 +420,8 @@ class OpsGraphAppService:
         command: HypothesisDecisionCommand | dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> HypothesisDecisionResponse:
         if isinstance(command, dict):
             command = HypothesisDecisionCommand.model_validate(command)
@@ -298,7 +438,13 @@ class OpsGraphAppService:
         )
         if cached is not None:
             return cached
-        response = self.repository.decide_hypothesis(incident_id, hypothesis_id, command)
+        response = self.repository.decide_hypothesis(
+            incident_id,
+            hypothesis_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
         self._emit_incident_event(
             incident_id=incident_id,
             event_name="opsgraph.hypothesis.updated",
@@ -325,6 +471,8 @@ class OpsGraphAppService:
         command: RecommendationDecisionCommand | dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> RecommendationDecisionResponse:
         if isinstance(command, dict):
             command = RecommendationDecisionCommand.model_validate(command)
@@ -341,7 +489,13 @@ class OpsGraphAppService:
         )
         if cached is not None:
             return cached
-        response = self.repository.decide_recommendation(incident_id, recommendation_id, command)
+        response = self.repository.decide_recommendation(
+            incident_id,
+            recommendation_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
         self._emit_incident_event(
             incident_id=incident_id,
             event_name="opsgraph.incident.updated",
@@ -386,6 +540,8 @@ class OpsGraphAppService:
         command: CommsPublishCommand | dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> CommsPublishResponse:
         if isinstance(command, dict):
             command = CommsPublishCommand.model_validate(command)
@@ -398,7 +554,13 @@ class OpsGraphAppService:
         )
         if cached is not None:
             return cached
-        response = self.repository.publish_comms(incident_id, draft_id, command)
+        response = self.repository.publish_comms(
+            incident_id,
+            draft_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
         self._emit_incident_event(
             incident_id=incident_id,
             event_name="opsgraph.comms.updated",
@@ -425,6 +587,8 @@ class OpsGraphAppService:
         command: ResolveIncidentCommand | dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> IncidentSummary:
         if isinstance(command, dict):
             command = ResolveIncidentCommand.model_validate(command)
@@ -437,7 +601,12 @@ class OpsGraphAppService:
         )
         if cached is not None:
             return cached
-        response = self.repository.resolve_incident(incident_id, command)
+        response = self.repository.resolve_incident(
+            incident_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
         self._emit_incident_event(
             incident_id=incident_id,
             event_name="opsgraph.incident.updated",
@@ -463,6 +632,8 @@ class OpsGraphAppService:
         command: CloseIncidentCommand | dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> IncidentSummary:
         if isinstance(command, dict):
             command = CloseIncidentCommand.model_validate(command)
@@ -475,7 +646,12 @@ class OpsGraphAppService:
         )
         if cached is not None:
             return cached
-        response = self.repository.close_incident(incident_id, command)
+        response = self.repository.close_incident(
+            incident_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
         self._emit_incident_event(
             incident_id=incident_id,
             event_name="opsgraph.incident.updated",
@@ -504,6 +680,8 @@ class OpsGraphAppService:
         command: PostmortemFinalizeCommand | dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> PostmortemSummary:
         if isinstance(command, dict):
             command = PostmortemFinalizeCommand.model_validate(command)
@@ -516,7 +694,12 @@ class OpsGraphAppService:
         )
         if cached is not None:
             return cached
-        response = self.repository.finalize_postmortem(incident_id, command)
+        response = self.repository.finalize_postmortem(
+            incident_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
         self._emit_incident_event(
             incident_id=incident_id,
             event_name="opsgraph.postmortem.updated",
@@ -561,6 +744,8 @@ class OpsGraphAppService:
         command: ReplayRunCommand | dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> ReplayRunSummary:
         if isinstance(command, dict):
             command = ReplayRunCommand.model_validate(command)
@@ -573,7 +758,11 @@ class OpsGraphAppService:
         )
         if cached is not None:
             return cached
-        response = self.repository.start_replay_run(command)
+        response = self.repository.start_replay_run(
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            idempotency_key=idempotency_key,
+        )
         self._store_idempotent_response(
             operation="opsgraph.start_replay_run",
             idempotency_key=idempotency_key,
@@ -631,13 +820,31 @@ class OpsGraphAppService:
         self,
         replay_run_id: str,
         command: ReplayStatusCommand | dict[str, Any],
+        *,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> ReplayRunSummary:
         if isinstance(command, dict):
             command = ReplayStatusCommand.model_validate(command)
-        return self.repository.update_replay_status(replay_run_id, command)
+        return self.repository.update_replay_status(
+            replay_run_id,
+            command,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+        )
 
-    def execute_replay_run(self, replay_run_id: str) -> ReplayRunSummary:
-        replay = self.repository.mark_replay_execution(replay_run_id, status="running")
+    def execute_replay_run(
+        self,
+        replay_run_id: str,
+        *,
+        auth_context=None,
+        request_id: str | None = None,
+    ) -> ReplayRunSummary:
+        audit_context = self._build_audit_context(auth_context, request_id=request_id)
+        replay = self.repository.mark_replay_execution(
+            replay_run_id,
+            status="running",
+            actor_context=audit_context,
+        )
         try:
             if self.shared_platform is None or self.workflow_registry is None or self.prompt_service is None:
                 raise ValueError("Replay execution requires shared platform runtime components")
@@ -676,6 +883,9 @@ class OpsGraphAppService:
                 replay_run_id,
                 status="failed",
                 error_message=str(exc),
+                actor_context=audit_context,
+                audit_action_type="replay.execute",
+                request_payload={"action": "execute"},
             )
         return self.repository.mark_replay_execution(
             replay_run_id,
@@ -683,11 +893,17 @@ class OpsGraphAppService:
             workflow_run_id=result.workflow_run_id,
             current_state=result.current_state,
             error_message=None,
+            actor_context=audit_context,
+            audit_action_type="replay.execute",
+            request_payload={"action": "execute"},
         )
 
     def capture_replay_baseline(
         self,
         command: ReplayBaselineCaptureCommand | dict[str, Any],
+        *,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> ReplayBaselineSummary:
         if isinstance(command, dict):
             command = ReplayBaselineCaptureCommand.model_validate(command)
@@ -722,12 +938,16 @@ class OpsGraphAppService:
             final_state=result.current_state,
             checkpoint_seq=result.checkpoint_seq,
             node_summaries=node_summaries,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
         )
 
     def evaluate_replay_run(
         self,
         replay_run_id: str,
         command: ReplayEvaluationCommand | dict[str, Any],
+        *,
+        auth_context=None,
+        request_id: str | None = None,
     ) -> ReplayEvaluationSummary:
         if isinstance(command, dict):
             command = ReplayEvaluationCommand.model_validate(command)
@@ -854,6 +1074,8 @@ class OpsGraphAppService:
         return self.repository.attach_replay_evaluation_artifact(
             evaluation.report_id,
             report_artifact_path=artifact_path,
+            actor_context=self._build_audit_context(auth_context, request_id=request_id),
+            request_payload=command.model_dump(mode="json"),
         )
 
     def ingest_alert(

@@ -34,6 +34,9 @@ class OpsGraphBootstrapTests(unittest.TestCase):
         except Exception as exc:
             self.assertEqual(exc.__class__.__name__, "FastAPIUnavailableError")
         else:
+            service = getattr(app.state, "opsgraph_service", None)
+            if service is not None and hasattr(service, "close"):
+                self.addCleanup(service.close)
             self.assertTrue(hasattr(app, "routes"))
 
 

@@ -1,7 +1,7 @@
 # OpsGraph API and Event Contracts
 
 - Version: v0.1
-- Date: 2026-03-16
+- Date: 2026-03-26
 - Scope: `OpsGraph` REST, webhook, SSE, and async event contracts
 
 ## 1. Contract Summary
@@ -9,12 +9,42 @@
 This document defines the implementation-grade interface for `OpsGraph`:
 
 1. Alert webhook ingestion
-2. Incident list and incident workspace APIs
-3. Fact, hypothesis, recommendation, and communication APIs
-4. Incident resolution and replay APIs
-5. OpsGraph-specific SSE and async event contracts
+2. Session auth issuance, refresh, current-user, and logout APIs
+3. Session-scoped membership administration APIs
+4. Incident list and incident workspace APIs
+5. Fact, hypothesis, recommendation, and communication APIs
+6. Incident resolution and replay APIs
+7. OpsGraph-specific SSE and async event contracts
 
-Shared authentication, approval, workflow, artifact, and feedback contracts are defined in the shared platform contract.
+Shared approval, workflow, artifact, and feedback contracts are defined in the shared platform contract. Product-local auth/session contracts are defined below.
+
+### Session Auth Surface
+
+- `POST /api/v1/auth/session`
+  - Purpose: issue a bearer access token plus an HTTP-only `refresh_token` cookie
+  - Request: `{ "email": "...", "password": "...", "organization_slug": "acme" }`
+- `POST /api/v1/auth/session/refresh`
+  - Purpose: rotate the current refresh token cookie and mint a fresh bearer access token
+- `DELETE /api/v1/auth/session/current`
+  - Purpose: revoke the current session and clear the refresh cookie
+- `GET /api/v1/me` and `GET /api/v1/auth/me`
+  - Purpose: return the active user, active organization, and memberships for the current session
+- `GET /api/v1/auth/memberships`
+  - Purpose: list memberships in the current session organization
+  - Auth: `product_admin` or stronger
+- `POST /api/v1/auth/memberships`
+  - Purpose: provision or reactivate one membership in the current session organization
+  - Auth: `product_admin` or stronger
+- `PATCH /api/v1/auth/memberships/:membershipId`
+  - Purpose: update one membership role, status, or display name in the current session organization
+  - Auth: `product_admin` or stronger
+
+Notes:
+
+1. Bearer session tokens do not require `X-Organization-Id`; tenant context is embedded in the session
+2. Existing header-based auth remains supported for local/demo compatibility on business routes
+3. Session management routes require a real session token and do not accept header-only fallback
+4. Membership admin routes revoke active sessions in the current org when role or status changes
 
 ## 2. Domain Design Rules
 
@@ -25,6 +55,50 @@ Shared authentication, approval, workflow, artifact, and feedback contracts are 
 5. Incident workspace reads are optimized for current-state snapshots plus append-only timeline
 
 ## 3. Domain Resource Shapes
+
+### 3.0 `ManagedMembershipSummary`
+
+```json
+{
+  "id": "membership-uuid",
+  "organization_id": "org-1",
+  "organization_slug": "acme",
+  "organization_name": "Acme",
+  "user": {
+    "id": "user-1",
+    "email": "operator@example.com",
+    "display_name": "Ops Operator",
+    "status": "active"
+  },
+  "role": "operator",
+  "status": "active",
+  "created_at": "2026-03-26T08:00:00Z",
+  "updated_at": "2026-03-26T08:00:00Z"
+}
+```
+
+### 3.0.1 Membership Admin Request Shapes
+
+- `POST /api/v1/auth/memberships`
+
+```json
+{
+  "email": "new-operator@example.com",
+  "display_name": "New Operator",
+  "role": "operator",
+  "password": "opsgraph-demo-new"
+}
+```
+
+- `PATCH /api/v1/auth/memberships/:membershipId`
+
+```json
+{
+  "role": "viewer",
+  "status": "suspended",
+  "display_name": "Renamed Operator"
+}
+```
 
 ### 3.1 `IncidentSummary`
 
@@ -117,6 +191,46 @@ Shared authentication, approval, workflow, artifact, and feedback contracts are 
   "fact_set_version": 3,
   "approval_task_id": null,
   "created_at": "2026-03-16T09:08:00Z"
+}
+```
+
+### 3.7 `TimelineEventSummary`
+
+```json
+{
+  "id": "uuid",
+  "kind": "fact_confirmed",
+  "summary": "Checkout requests are failing for 27% of users.",
+  "actor_type": "user",
+  "actor_id": "uuid",
+  "subject_type": "incident_fact",
+  "subject_id": "uuid",
+  "payload": {
+    "fact_type": "impact",
+    "fact_set_version": 3
+  },
+  "created_at": "2026-03-16T09:03:00Z"
+}
+```
+
+### 3.8 `AuditLogSummary`
+
+```json
+{
+  "id": "uuid",
+  "incident_id": "uuid",
+  "action_type": "incident.add_fact",
+  "actor_type": "user",
+  "actor_user_id": "uuid",
+  "actor_role": "operator",
+  "session_id": "uuid",
+  "request_id": "req-123",
+  "idempotency_key": "fact-add-1",
+  "subject_type": "incident_fact",
+  "subject_id": "uuid",
+  "request_payload": {},
+  "result_payload": {},
+  "created_at": "2026-03-16T09:03:00Z"
 }
 ```
 
@@ -424,6 +538,93 @@ Response:
 
 - `200 OK` with `ApprovalTaskSummary`
 
+### 5.7.3 `GET /api/v1/opsgraph/incidents/:incidentId/audit-logs`
+
+Purpose: list incident-scoped operator audit logs for manual actions and replay-admin mutations.
+
+Auth: `operator` or stronger
+
+Query params:
+
+- `action_type`
+- `actor_user_id`
+- `cursor`
+- `limit`
+
+Response:
+
+- `200 OK` with paginated `AuditLogSummary[]`
+
+### 5.7.4 `POST /api/v1/opsgraph/approvals/:approvalTaskId/decision`
+
+Purpose: approve or reject one approval task and optionally orchestrate the linked downstream action.
+
+Auth: `operator` or stronger
+
+Headers:
+
+- `Idempotency-Key` optional
+
+Request body:
+
+```json
+{
+  "decision": "approve",
+  "comment": "Approved by incident commander.",
+  "execute_recommendation": true,
+  "publish_linked_drafts": true,
+  "linked_draft_ids": [],
+  "expected_fact_set_version": 3
+}
+```
+
+Rules:
+
+1. `reject` cannot be combined with execution or publish side effects
+2. `execute_recommendation` only works when the approval task is linked to a recommendation
+3. Publishing linked drafts requires `expected_fact_set_version`
+4. Every selected draft must already be linked to the approval task
+
+Response:
+
+- `200 OK`
+
+```json
+{
+  "data": {
+    "approval_task": {
+      "id": "approval-task-1",
+      "incident_id": "incident-1",
+      "recommendation_id": "recommendation-1",
+      "status": "approved"
+    },
+    "recommendation": {
+      "recommendation_id": "recommendation-1",
+      "status": "executed",
+      "approval_task_id": "approval-task-1",
+      "approval_status": "approved"
+    },
+    "published_drafts": [
+      {
+        "draft_id": "draft-1",
+        "status": "published",
+        "published_message_ref": "internal_slack-msg-123"
+      }
+    ]
+  }
+}
+```
+
+Errors:
+
+- `APPROVAL_STATUS_CONFLICT`
+- `APPROVAL_DECISION_INVALID`
+- `APPROVAL_EXECUTION_REQUIRES_RECOMMENDATION`
+- `APPROVAL_PUBLISH_FACT_SET_REQUIRED`
+- `APPROVAL_DRAFT_SELECTION_INVALID`
+- `COMM_DRAFT_STALE_FACT_SET`
+- `COMM_DRAFT_ALREADY_PUBLISHED`
+
 ### 5.8 `GET /api/v1/opsgraph/incidents/:incidentId/comms`
 
 Purpose: list communication drafts for an incident.
@@ -570,7 +771,7 @@ Response:
 
 Purpose: mark the current postmortem as final and stamp finalization metadata.
 
-Auth: `incident_commander` or stronger
+Auth: `operator` or stronger
 
 Headers:
 
@@ -673,6 +874,10 @@ Response:
 }
 ```
 
+Notes:
+
+1. Successful replay submissions are persisted to incident audit logs as `replay.start_run`
+
 ### 5.15 `GET /api/v1/opsgraph/replays`
 
 Purpose: list replay runs for one workspace or one incident.
@@ -708,6 +913,10 @@ Query params:
 Response:
 
 - `200 OK`
+
+Notes:
+
+1. Replay baseline capture, replay status mutation, replay execute, and replay evaluate flows are also persisted to incident audit logs as `replay.capture_baseline`, `replay.update_status`, `replay.execute`, and `replay.evaluate`
 
 ## 6. SSE Contract
 
@@ -947,19 +1156,29 @@ Payload:
 | `REPLAY_RUN_NOT_EXECUTED` | `409` | Replay evaluation requested before execution completed |
 | `REPLAY_STATUS_CONFLICT` | `409` | Replay status transition is invalid for the current run state |
 | `REPLAY_EVALUATION_UNAVAILABLE` | `503` | Replay evaluation runtime dependencies unavailable |
+| `AUTH_REQUIRED` | `401` | Bearer token missing for a protected route |
+| `TENANT_CONTEXT_REQUIRED` | `400` | Header-mode auth call omitted `X-Organization-Id` |
+| `AUTH_INVALID_CREDENTIALS` | `401` | Login, bearer token, or refresh token is invalid |
+| `AUTH_SESSION_EXPIRED` | `401` | Session access or refresh token expired |
+| `AUTH_SESSION_REVOKED` | `401` | Session was explicitly revoked or rotated out |
+| `AUTH_SESSION_REQUIRED` | `401` | Endpoint requires a real session-backed login |
 
 ## 9. Authorization Matrix
 
 | Endpoint Family | Minimum Role |
 | --- | --- |
+| Session create / refresh | Public |
+| Current user / session revoke | `viewer` via session token |
 | Incident list/read | `viewer` |
 | Fact add/retract | `operator` |
 | Severity override | `operator` |
 | Hypothesis decision | `operator` |
 | Recommendation read | `viewer` |
+| Incident audit log read | `operator` |
 | Comms draft read | `viewer` |
 | Comms publish | `operator` |
 | Resolve/close incident | `operator` |
+| Postmortem finalize | `operator` |
 | Replay trigger | `product_admin` |
 | Replay read | `viewer` |
 

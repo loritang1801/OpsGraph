@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 import json
 import shutil
 import sys
@@ -17,6 +18,7 @@ if str(SRC) not in sys.path:
 from opsgraph_app.bootstrap import build_app_service
 from opsgraph_app.repository import ApprovalTaskRow, ArtifactBlobRow, CommsDraftRow, PostmortemRow, ReplayCaseRow
 from opsgraph_app.sample_payloads import (
+    approval_decision_command,
     alert_ingest_command,
     close_incident_command,
     comms_publish_command,
@@ -35,6 +37,7 @@ from opsgraph_app.sample_payloads import (
     retrospective_command,
     severity_override_command,
 )
+from shared_core.agent_platform.sqlalchemy_stores import ReplayRecordRow, WorkflowStateRow
 
 
 def _create_repo_tempdir(prefix: str) -> Path:
@@ -44,6 +47,21 @@ def _create_repo_tempdir(prefix: str) -> Path:
 
 
 class OpsGraphServiceTests(unittest.TestCase):
+    @staticmethod
+    def _issue_auth_context(service, *, email: str, required_role: str):
+        issue = service.auth_service.create_session(
+            {
+                "email": email,
+                "password": "opsgraph-demo",
+                "organization_slug": "acme",
+            }
+        )
+        return service.auth_service.build_authorizer().authorize(
+            required_role=required_role,
+            authorization=f"Bearer {issue.response.access_token}",
+            organization_id="org-1",
+        )
+
     def test_query_incident_workspace_and_alert_ingest(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
@@ -195,6 +213,98 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(first.fact_id, second.fact_id)
         self.assertEqual(first.current_fact_set_version, second.current_fact_set_version)
 
+    def test_manual_actions_record_audit_logs_and_timeline_actor_context(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        issue = service.auth_service.create_session(
+            {
+                "email": "operator@example.com",
+                "password": "opsgraph-demo",
+                "organization_slug": "acme",
+            }
+        )
+        auth_context = service.auth_service.build_authorizer().authorize(
+            required_role="operator",
+            authorization=f"Bearer {issue.response.access_token}",
+            organization_id="org-1",
+        )
+
+        created = service.add_fact(
+            "incident-1",
+            fact_create_command(),
+            idempotency_key="fact-audit-1",
+            auth_context=auth_context,
+            request_id="req-audit-1",
+        )
+        logs = service.list_audit_logs(
+            "incident-1",
+            action_type="incident.add_fact",
+            actor_user_id="user-operator-1",
+        )
+        workspace = service.get_incident_workspace("incident-1")
+        matching_timeline = [
+            item
+            for item in workspace.timeline
+            if item.subject_type == "incident_fact" and item.subject_id == created.fact_id
+        ]
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0].actor_type, "user")
+        self.assertEqual(logs[0].actor_user_id, "user-operator-1")
+        self.assertEqual(logs[0].actor_role, "operator")
+        self.assertIsNotNone(logs[0].session_id)
+        self.assertEqual(logs[0].request_id, "req-audit-1")
+        self.assertEqual(logs[0].idempotency_key, "fact-audit-1")
+        self.assertEqual(logs[0].subject_type, "incident_fact")
+        self.assertEqual(logs[0].subject_id, created.fact_id)
+        self.assertEqual(logs[0].result_payload["fact_id"], created.fact_id)
+        self.assertEqual(logs[0].request_payload["fact_type"], "impact")
+        self.assertEqual(len(matching_timeline), 1)
+        self.assertEqual(matching_timeline[0].actor_type, "user")
+        self.assertEqual(matching_timeline[0].actor_id, "user-operator-1")
+        self.assertEqual(matching_timeline[0].payload["fact_set_version"], created.current_fact_set_version)
+
+    def test_idempotent_manual_action_does_not_duplicate_audit_log(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        issue = service.auth_service.create_session(
+            {
+                "email": "operator@example.com",
+                "password": "opsgraph-demo",
+                "organization_slug": "acme",
+            }
+        )
+        auth_context = service.auth_service.build_authorizer().authorize(
+            required_role="operator",
+            authorization=f"Bearer {issue.response.access_token}",
+            organization_id="org-1",
+        )
+
+        service.add_fact(
+            "incident-1",
+            fact_create_command(),
+            idempotency_key="fact-audit-idempotent",
+            auth_context=auth_context,
+            request_id="req-audit-idempotent",
+        )
+        service.add_fact(
+            "incident-1",
+            fact_create_command(),
+            idempotency_key="fact-audit-idempotent",
+            auth_context=auth_context,
+            request_id="req-audit-idempotent-second",
+        )
+        logs = service.list_audit_logs(
+            "incident-1",
+            action_type="incident.add_fact",
+            actor_user_id="user-operator-1",
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0].idempotency_key, "fact-audit-idempotent")
+
     def test_start_replay_run_rejects_idempotency_conflict(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
@@ -209,6 +319,198 @@ class OpsGraphServiceTests(unittest.TestCase):
                 replay_run_command(model_bundle_version="opsgraph-bundle-v2"),
                 idempotency_key="replay-run-conflict",
             )
+
+    def test_idempotent_replay_run_does_not_duplicate_audit_log(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+
+        first = service.start_replay_run(
+            replay_run_command(model_bundle_version="opsgraph-audit-v1"),
+            idempotency_key="replay-run-audit-idempotent",
+            auth_context=auth_context,
+            request_id="req-replay-run-audit-1",
+        )
+        second = service.start_replay_run(
+            replay_run_command(model_bundle_version="opsgraph-audit-v1"),
+            idempotency_key="replay-run-audit-idempotent",
+            auth_context=auth_context,
+            request_id="req-replay-run-audit-2",
+        )
+        logs = service.list_audit_logs(
+            "incident-1",
+            action_type="replay.start_run",
+            actor_user_id="user-admin-1",
+        )
+
+        self.assertEqual(first.replay_run_id, second.replay_run_id)
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0].idempotency_key, "replay-run-audit-idempotent")
+
+    def test_replay_admin_actions_record_audit_logs_and_timeline_actor_context(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+
+        replay = service.start_replay_run(
+            replay_run_command(model_bundle_version="opsgraph-audit-admin-v1"),
+            idempotency_key="replay-admin-audit-start-1",
+            auth_context=auth_context,
+            request_id="req-replay-admin-start-1",
+        )
+        baseline = service.capture_replay_baseline(
+            replay_baseline_capture_command(model_bundle_version="opsgraph-audit-admin-v1"),
+            auth_context=auth_context,
+            request_id="req-replay-admin-baseline-1",
+        )
+        status = service.update_replay_status(
+            replay.replay_run_id,
+            replay_status_command(status="running"),
+            auth_context=auth_context,
+            request_id="req-replay-admin-status-1",
+        )
+        start_logs = service.list_audit_logs(
+            "incident-1",
+            action_type="replay.start_run",
+            actor_user_id="user-admin-1",
+        )
+        baseline_logs = service.list_audit_logs(
+            "incident-1",
+            action_type="replay.capture_baseline",
+            actor_user_id="user-admin-1",
+        )
+        status_logs = service.list_audit_logs(
+            "incident-1",
+            action_type="replay.update_status",
+            actor_user_id="user-admin-1",
+        )
+        workspace = service.get_incident_workspace("incident-1")
+        queued_timeline = [
+            item
+            for item in workspace.timeline
+            if item.subject_type == "replay_run"
+            and item.subject_id == replay.replay_run_id
+            and item.kind == "replay_run_queued"
+        ]
+        running_timeline = [
+            item
+            for item in workspace.timeline
+            if item.subject_type == "replay_run"
+            and item.subject_id == replay.replay_run_id
+            and item.kind == "replay_status_updated"
+            and item.payload.get("status") == "running"
+        ]
+        baseline_timeline = [
+            item
+            for item in workspace.timeline
+            if item.subject_type == "replay_baseline" and item.subject_id == baseline.baseline_id
+        ]
+
+        self.assertEqual(status.status, "running")
+        self.assertEqual(len(start_logs), 1)
+        self.assertEqual(start_logs[0].actor_role, "product_admin")
+        self.assertEqual(start_logs[0].request_id, "req-replay-admin-start-1")
+        self.assertEqual(start_logs[0].subject_id, replay.replay_run_id)
+        self.assertEqual(start_logs[0].result_payload["status"], "queued")
+        self.assertEqual(len(baseline_logs), 1)
+        self.assertEqual(baseline_logs[0].request_id, "req-replay-admin-baseline-1")
+        self.assertEqual(baseline_logs[0].subject_id, baseline.baseline_id)
+        self.assertEqual(baseline_logs[0].result_payload["workflow_run_id"], baseline.workflow_run_id)
+        self.assertEqual(len(status_logs), 1)
+        self.assertEqual(status_logs[0].request_id, "req-replay-admin-status-1")
+        self.assertEqual(status_logs[0].request_payload["status"], "running")
+        self.assertEqual(status_logs[0].result_payload["status"], "running")
+        self.assertEqual(len(queued_timeline), 1)
+        self.assertEqual(queued_timeline[0].actor_type, "user")
+        self.assertEqual(queued_timeline[0].actor_id, "user-admin-1")
+        self.assertEqual(len(running_timeline), 1)
+        self.assertEqual(running_timeline[0].actor_id, "user-admin-1")
+        self.assertEqual(len(baseline_timeline), 1)
+        self.assertEqual(baseline_timeline[0].actor_id, "user-admin-1")
+
+    def test_replay_execute_and_evaluate_record_audit_logs(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+
+        baseline = service.capture_replay_baseline(
+            replay_baseline_capture_command(model_bundle_version="opsgraph-audit-eval-v1"),
+            auth_context=auth_context,
+            request_id="req-replay-eval-baseline-1",
+        )
+        replay = service.start_replay_run(
+            replay_run_command(model_bundle_version="opsgraph-audit-eval-v1"),
+            idempotency_key="replay-audit-execute-start-1",
+            auth_context=auth_context,
+            request_id="req-replay-eval-start-1",
+        )
+        executed = service.execute_replay_run(
+            replay.replay_run_id,
+            auth_context=auth_context,
+            request_id="req-replay-execute-1",
+        )
+        report = service.evaluate_replay_run(
+            replay.replay_run_id,
+            replay_evaluation_command(baseline_id=baseline.baseline_id),
+            auth_context=auth_context,
+            request_id="req-replay-evaluate-1",
+        )
+        execute_logs = service.list_audit_logs(
+            "incident-1",
+            action_type="replay.execute",
+            actor_user_id="user-admin-1",
+        )
+        evaluate_logs = service.list_audit_logs(
+            "incident-1",
+            action_type="replay.evaluate",
+            actor_user_id="user-admin-1",
+        )
+        workspace = service.get_incident_workspace("incident-1")
+        completed_timeline = [
+            item
+            for item in workspace.timeline
+            if item.subject_type == "replay_run"
+            and item.subject_id == replay.replay_run_id
+            and item.kind == "replay_status_updated"
+            and item.payload.get("status") == "completed"
+        ]
+        evaluation_timeline = [
+            item
+            for item in workspace.timeline
+            if item.subject_type == "replay_evaluation" and item.subject_id == report.report_id
+        ]
+
+        self.assertEqual(executed.status, "completed")
+        self.assertEqual(len(execute_logs), 1)
+        self.assertEqual(execute_logs[0].request_id, "req-replay-execute-1")
+        self.assertEqual(execute_logs[0].subject_id, replay.replay_run_id)
+        self.assertEqual(execute_logs[0].result_payload["status"], "completed")
+        self.assertEqual(execute_logs[0].result_payload["workflow_run_id"], executed.workflow_run_id)
+        self.assertEqual(len(evaluate_logs), 1)
+        self.assertEqual(evaluate_logs[0].request_id, "req-replay-evaluate-1")
+        self.assertEqual(evaluate_logs[0].subject_id, report.report_id)
+        self.assertEqual(evaluate_logs[0].request_payload["baseline_id"], baseline.baseline_id)
+        self.assertEqual(evaluate_logs[0].result_payload["report_id"], report.report_id)
+        self.assertIsNotNone(evaluate_logs[0].result_payload["report_artifact_path"])
+        self.assertEqual(len(completed_timeline), 1)
+        self.assertEqual(completed_timeline[0].actor_id, "user-admin-1")
+        self.assertEqual(len(evaluation_timeline), 1)
+        self.assertEqual(evaluation_timeline[0].actor_id, "user-admin-1")
 
     def test_decide_recommendation_is_idempotent_for_repeated_key(self) -> None:
         service = build_app_service()
@@ -399,6 +701,248 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(approval_task.recommendation_id, "recommendation-1")
         self.assertEqual(approval_task.status, "pending")
 
+    def test_decide_approval_task_orchestrates_recommendation_execution_and_comms_publish(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        now = service.repository._utcnow_naive()
+        with service.repository.session_factory.begin() as session:
+            draft_row = session.get(CommsDraftRow, "draft-1")
+            self.assertIsNotNone(draft_row)
+            draft_row.approval_task_id = "approval-task-1"
+            draft_row.updated_at = now
+
+        response = service.decide_approval_task(
+            "approval-task-1",
+            approval_decision_command(
+                decision="approve",
+                execute_recommendation=True,
+                publish_linked_drafts=True,
+                expected_fact_set_version=1,
+            ),
+            idempotency_key="approval-orchestrate-1",
+        )
+        workspace = service.get_incident_workspace("incident-1")
+        pending = service.runtime_stores.outbox_store.list_pending()
+
+        self.assertEqual(response.approval_task.status, "approved")
+        self.assertIsNotNone(response.recommendation)
+        self.assertEqual(response.recommendation.status, "executed")
+        self.assertEqual(response.recommendation.approval_status, "approved")
+        self.assertEqual(len(response.published_drafts), 1)
+        self.assertEqual(response.published_drafts[0].draft_id, "draft-1")
+        self.assertEqual(response.published_drafts[0].status, "published")
+        self.assertEqual(workspace.recommendations[0].status, "executed")
+        self.assertEqual(workspace.approval_tasks[0].status, "approved")
+        self.assertEqual(workspace.comms_drafts[0].status, "published")
+        self.assertTrue(
+            any(
+                item.event.event_name == "opsgraph.approval.updated"
+                and item.event.payload.get("approval_task_id") == "approval-task-1"
+                for item in pending
+            )
+        )
+        self.assertTrue(
+            any(
+                item.event.event_name == "opsgraph.comms.updated"
+                and item.event.payload.get("draft_id") == "draft-1"
+                for item in pending
+            )
+        )
+
+    def test_decide_approval_task_supports_comms_only_approval_and_idempotency(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        now = service.repository._utcnow_naive()
+        with service.repository.session_factory.begin() as session:
+            session.add(
+                ApprovalTaskRow(
+                    approval_task_id="approval-task-draft-pending",
+                    incident_id="incident-1",
+                    recommendation_id=None,
+                    status="pending",
+                    comment=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            draft_row = session.get(CommsDraftRow, "draft-1")
+            self.assertIsNotNone(draft_row)
+            draft_row.approval_task_id = "approval-task-draft-pending"
+            draft_row.updated_at = now
+
+        first = service.decide_approval_task(
+            "approval-task-draft-pending",
+            approval_decision_command(
+                decision="approve",
+                linked_draft_ids=["draft-1"],
+                expected_fact_set_version=1,
+            ),
+            idempotency_key="approval-orchestrate-2",
+        )
+        second = service.decide_approval_task(
+            "approval-task-draft-pending",
+            approval_decision_command(
+                decision="approve",
+                linked_draft_ids=["draft-1"],
+                expected_fact_set_version=1,
+            ),
+            idempotency_key="approval-orchestrate-2",
+        )
+
+        self.assertEqual(first.approval_task.approval_task_id, second.approval_task.approval_task_id)
+        self.assertEqual(first.approval_task.status, "approved")
+        self.assertIsNone(first.recommendation)
+        self.assertEqual(len(first.published_drafts), 1)
+        self.assertEqual(first.published_drafts[0].status, "published")
+
+    def test_decide_approval_task_validates_orchestration_inputs(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        with self.assertRaisesRegex(ValueError, "APPROVAL_DECISION_INVALID"):
+            service.decide_approval_task(
+                "approval-task-1",
+                approval_decision_command(decision="reject", execute_recommendation=True),
+            )
+
+        with self.assertRaisesRegex(ValueError, "APPROVAL_PUBLISH_FACT_SET_REQUIRED"):
+            service.decide_approval_task(
+                "approval-task-1",
+                approval_decision_command(decision="approve", publish_linked_drafts=True),
+            )
+
+        now = service.repository._utcnow_naive()
+        with service.repository.session_factory.begin() as session:
+            session.add(
+                ApprovalTaskRow(
+                    approval_task_id="approval-task-no-rec",
+                    incident_id="incident-1",
+                    recommendation_id=None,
+                    status="pending",
+                    comment=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        with self.assertRaisesRegex(ValueError, "APPROVAL_EXECUTION_REQUIRES_RECOMMENDATION"):
+            service.decide_approval_task(
+                "approval-task-no-rec",
+                approval_decision_command(decision="approve", execute_recommendation=True),
+            )
+
+        with self.assertRaisesRegex(ValueError, "APPROVAL_DRAFT_SELECTION_INVALID"):
+            service.decide_approval_task(
+                "approval-task-no-rec",
+                approval_decision_command(
+                    decision="approve",
+                    linked_draft_ids=["draft-missing"],
+                    expected_fact_set_version=1,
+                ),
+            )
+
+    def test_decide_approval_task_rejects_idempotency_conflict_for_different_payload(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.decide_approval_task(
+            "approval-task-1",
+            approval_decision_command(decision="approve"),
+            idempotency_key="approval-conflict-1",
+        )
+
+        with self.assertRaisesRegex(ValueError, "IDEMPOTENCY_CONFLICT"):
+            service.decide_approval_task(
+                "approval-task-1",
+                approval_decision_command(decision="reject", comment="Different payload."),
+                idempotency_key="approval-conflict-1",
+            )
+
+    def test_decide_approval_task_conflicts_after_terminal_state(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.decide_approval_task(
+            "approval-task-1",
+            approval_decision_command(decision="approve"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "APPROVAL_STATUS_CONFLICT"):
+            service.decide_approval_task(
+                "approval-task-1",
+                approval_decision_command(decision="approve"),
+            )
+
+    def test_decide_approval_task_rejects_stale_fact_set_when_publishing(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        now = service.repository._utcnow_naive()
+        with service.repository.session_factory.begin() as session:
+            session.add(
+                ApprovalTaskRow(
+                    approval_task_id="approval-task-draft-stale",
+                    incident_id="incident-1",
+                    recommendation_id=None,
+                    status="pending",
+                    comment=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            draft_row = session.get(CommsDraftRow, "draft-1")
+            self.assertIsNotNone(draft_row)
+            draft_row.approval_task_id = "approval-task-draft-stale"
+            draft_row.updated_at = now
+
+        service.add_fact("incident-1", fact_create_command())
+
+        with self.assertRaisesRegex(ValueError, "COMM_DRAFT_STALE_FACT_SET"):
+            service.decide_approval_task(
+                "approval-task-draft-stale",
+                approval_decision_command(
+                    decision="approve",
+                    publish_linked_drafts=True,
+                    expected_fact_set_version=1,
+                ),
+            )
+
+    def test_decide_approval_task_rejects_already_published_linked_draft(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        now = service.repository._utcnow_naive()
+        with service.repository.session_factory.begin() as session:
+            session.add(
+                ApprovalTaskRow(
+                    approval_task_id="approval-task-draft-published",
+                    incident_id="incident-1",
+                    recommendation_id=None,
+                    status="pending",
+                    comment=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            draft_row = session.get(CommsDraftRow, "draft-1")
+            self.assertIsNotNone(draft_row)
+            draft_row.approval_task_id = "approval-task-draft-published"
+            draft_row.status = "published"
+            draft_row.published_message_ref = "internal_slack-msg-existing"
+            draft_row.updated_at = now
+
+        with self.assertRaisesRegex(ValueError, "COMM_DRAFT_ALREADY_PUBLISHED"):
+            service.decide_approval_task(
+                "approval-task-draft-published",
+                approval_decision_command(
+                    decision="approve",
+                    publish_linked_drafts=True,
+                    expected_fact_set_version=1,
+                ),
+            )
+
     def test_list_comms_supports_channel_and_status_filters(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
@@ -569,17 +1113,93 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertTrue(all(item.matched for item in report.node_diffs))
         self.assertEqual(report.matched_node_count, len(report.node_diffs))
         self.assertEqual(report.mismatched_node_count, 0)
+        self.assertEqual(report.node_match_rate, 1.0)
         self.assertEqual(report.bundle_mismatch_count, 0)
+        self.assertEqual(report.version_mismatch_count, 0)
         self.assertEqual(report.summary_mismatch_count, 0)
+        self.assertEqual(report.missing_baseline_node_count, 0)
+        self.assertEqual(report.missing_replay_node_count, 0)
+        self.assertEqual(report.state_mismatch_count, 0)
+        self.assertEqual(report.checkpoint_mismatch_count, 0)
+        self.assertGreaterEqual(report.latency_improvement_count, 0)
+        self.assertGreaterEqual(report.latency_regression_total_ms, 0)
+        self.assertIsNotNone(report.avg_latency_delta_ms)
         self.assertIsNotNone(report.report_artifact_path)
         self.assertIsNotNone(report.markdown_report_path)
+        self.assertIsNotNone(report.csv_report_path)
         self.assertTrue(Path(report.report_artifact_path).exists())
         self.assertTrue(Path(report.markdown_report_path).exists())
+        self.assertTrue(Path(report.csv_report_path).exists())
         report_payload = json.loads(Path(report.report_artifact_path).read_text(encoding="utf-8"))
         self.assertEqual(report_payload["report"]["status"], "matched")
         self.assertEqual(report_payload["report"]["matched_node_count"], len(report.node_diffs))
+        self.assertEqual(report_payload["report"]["csv_report_path"], report.csv_report_path)
+        csv_lines = Path(report.csv_report_path).read_text(encoding="utf-8").splitlines()
+        self.assertTrue(csv_lines[0].startswith("checkpoint_seq,matched"))
+        self.assertEqual(len(csv_lines), len(report.node_diffs) + 1)
         self.assertTrue(any(item.baseline_id == baseline.baseline_id for item in baselines))
         self.assertTrue(any(item.report_id == report.report_id for item in reports))
+
+    def test_evaluate_replay_reports_richer_mismatch_metrics_and_csv_artifact(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        baseline = service.capture_replay_baseline(replay_baseline_capture_command())
+        replay = service.start_replay_run(replay_run_command())
+        executed = service.execute_replay_run(replay.replay_run_id)
+        expected_latency_regression = 0
+
+        with service.runtime_stores.replay_store.session_factory.begin() as session:
+            replay_rows = session.scalars(
+                select(ReplayRecordRow)
+                .where(ReplayRecordRow.workflow_run_id == executed.workflow_run_id)
+                .order_by(ReplayRecordRow.checkpoint_seq.asc())
+            ).all()
+            self.assertGreaterEqual(len(replay_rows), 1)
+            replay_rows[0].bundle_version = "2026-03-99.9"
+            replay_rows[0].output_summary = "Injected summary mismatch for replay regression coverage."
+            latency_row = replay_rows[1] if len(replay_rows) > 1 else replay_rows[0]
+            latency_row.recorded_at = latency_row.recorded_at + timedelta(milliseconds=250)
+            expected_latency_regression = 1 if len(replay_rows) > 1 else 0
+            if len(replay_rows) > 1:
+                session.delete(replay_rows[-1])
+            state_row = session.get(WorkflowStateRow, executed.workflow_run_id)
+            self.assertIsNotNone(state_row)
+            state_row.checkpoint_seq = state_row.checkpoint_seq + 1
+            state_payload = dict(state_row.state_payload)
+            state_payload["current_state"] = "mitigate"
+            state_payload["checkpoint_seq"] = int(state_payload.get("checkpoint_seq", state_row.checkpoint_seq - 1)) + 1
+            state_row.state_payload = state_payload
+
+        report = service.evaluate_replay_run(
+            replay.replay_run_id,
+            replay_evaluation_command(baseline_id=baseline.baseline_id),
+        )
+
+        self.assertEqual(report.status, "mismatched")
+        self.assertGreater(report.mismatch_count, 0)
+        self.assertLess(report.score, 1.0)
+        self.assertGreaterEqual(report.mismatched_node_count, 1)
+        self.assertLess(report.node_match_rate, 1.0)
+        self.assertGreaterEqual(report.version_mismatch_count, 1)
+        self.assertGreaterEqual(report.summary_mismatch_count, 1)
+        self.assertGreaterEqual(report.missing_replay_node_count, 1)
+        self.assertEqual(report.state_mismatch_count, 1)
+        self.assertEqual(report.checkpoint_mismatch_count, 1)
+        self.assertGreaterEqual(report.latency_regression_count, expected_latency_regression)
+        if expected_latency_regression:
+            self.assertGreater(report.latency_regression_total_ms, 0)
+        self.assertIsNotNone(report.avg_latency_delta_ms)
+        self.assertIsNotNone(report.csv_report_path)
+        self.assertTrue(Path(report.csv_report_path).exists())
+
+        report_payload = json.loads(Path(report.report_artifact_path).read_text(encoding="utf-8"))
+        self.assertEqual(report_payload["report"]["status"], "mismatched")
+        self.assertEqual(report_payload["report"]["version_mismatch_count"], report.version_mismatch_count)
+        self.assertEqual(report_payload["report"]["state_mismatch_count"], 1)
+        self.assertEqual(report_payload["artifacts"]["csv_report_path"], report.csv_report_path)
+        csv_payload = Path(report.csv_report_path).read_text(encoding="utf-8")
+        self.assertIn("Injected summary mismatch for replay regression coverage.", csv_payload)
 
     def test_evaluate_replay_requires_executed_run(self) -> None:
         service = build_app_service()

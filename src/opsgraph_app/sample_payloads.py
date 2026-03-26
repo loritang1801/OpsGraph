@@ -162,6 +162,25 @@ def comms_publish_command(
     }
 
 
+def approval_decision_command(
+    *,
+    decision: str = "approve",
+    comment: str = "Approved by incident commander.",
+    execute_recommendation: bool = False,
+    publish_linked_drafts: bool = False,
+    linked_draft_ids: list[str] | None = None,
+    expected_fact_set_version: int | None = None,
+) -> dict:
+    return {
+        "decision": decision,
+        "comment": comment,
+        "execute_recommendation": execute_recommendation,
+        "publish_linked_drafts": publish_linked_drafts,
+        "linked_draft_ids": list(linked_draft_ids or []),
+        "expected_fact_set_version": expected_fact_set_version,
+    }
+
+
 def recommendation_decision_command(
     *,
     decision: str = "approve",
