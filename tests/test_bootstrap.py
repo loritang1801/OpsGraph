@@ -9,8 +9,17 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from opsgraph_app.bootstrap import build_api_service, build_fastapi_app, list_supported_workflows
-from opsgraph_app.sample_payloads import incident_response_request
+from opsgraph_app.bootstrap import (
+    build_api_service,
+    build_fastapi_app,
+    build_replay_worker,
+    build_replay_worker_supervisor,
+    list_supported_workflows,
+)
+from opsgraph_app.sample_payloads import incident_response_request, replay_run_command
+from opsgraph_app.shared_runtime import load_shared_agent_platform
+
+_AP = load_shared_agent_platform()
 
 
 class OpsGraphBootstrapTests(unittest.TestCase):
@@ -34,10 +43,36 @@ class OpsGraphBootstrapTests(unittest.TestCase):
         except Exception as exc:
             self.assertEqual(exc.__class__.__name__, "FastAPIUnavailableError")
         else:
-            service = getattr(app.state, "opsgraph_service", None)
-            if service is not None and hasattr(service, "close"):
-                self.addCleanup(service.close)
+            service = _AP.assert_managed_app_service(self, app, state_attr="opsgraph_service")
             self.assertTrue(hasattr(app, "routes"))
+
+    def test_build_replay_worker_and_dispatch_jobs(self) -> None:
+        worker = build_replay_worker()
+        self.addCleanup(worker.app_service.close)
+
+        worker.app_service.start_replay_run(
+            replay_run_command(model_bundle_version="opsgraph-bootstrap-worker-v1"),
+            idempotency_key="opsgraph-bootstrap-worker-1",
+        )
+        result = worker.dispatch_once()
+        replays = worker.app_service.list_replays("ops-ws-1")
+
+        self.assertEqual(result.dispatched_count, 1)
+        self.assertTrue(any(item.status == "completed" for item in replays))
+
+    def test_build_replay_worker_supervisor_and_emit_idle_heartbeat(self) -> None:
+        supervisor = build_replay_worker_supervisor()
+        self.addCleanup(supervisor.worker.app_service.close)
+
+        heartbeats = supervisor.run(
+            poll_interval_seconds=0,
+            max_iterations=1,
+            max_idle_polls=1,
+            heartbeat_every_iterations=1,
+        )
+
+        self.assertEqual(len(heartbeats), 1)
+        self.assertEqual(heartbeats[0].status, "idle")
 
 
 if __name__ == "__main__":

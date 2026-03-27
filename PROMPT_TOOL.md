@@ -406,9 +406,9 @@ Rules:
 | `signal.read` | OpsGraph database over normalized signals | Prometheus/Grafana webhook payloads are normalized before agent access |
 | `incident.read_timeline` | OpsGraph database | Includes visibility flags for internal vs external use |
 | `context_bundle.read` | Context bundle reader | Wraps stored enrichment snapshot |
-| `deployment.lookup` | GitHub adapter + deployment cache | Exposes normalized deploy/change metadata only |
-| `service_registry.lookup` | Service registry database | Read-only service metadata and ownership |
-| `runbook.search` | Vector search + metadata store | Returns runbook refs, not raw full documents by default |
+| `deployment.lookup` | GitHub adapter or remote HTTP provider | Exposes normalized deploy/change metadata only; falls back to local heuristics in `auto` mode |
+| `service_registry.lookup` | Service registry database or remote HTTP provider | Read-only service metadata and ownership; canonical contract lives in `INTEGRATIONS.md` |
+| `runbook.search` | Vector search adapter or remote HTTP provider | Returns runbook refs, not raw full documents by default; remote contract also documented in `INTEGRATIONS.md` |
 | `comms.channel_preview` | Slack/Feishu policy adapter | Preview-only, no publish side effect |
 | `approval_task.read_state` | Shared platform approval store | Read-only approval status bridge |
 

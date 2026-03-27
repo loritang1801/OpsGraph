@@ -1,0 +1,16 @@
+{
+  "runbooks": [
+    {
+      "runbook_id": "runbook-checkout-api-rollback",
+      "title": "Rollback Checkout API safely",
+      "excerpt": "Rollback the latest checkout-api deployment and verify service health.",
+      "score": 0.98
+    },
+    {
+      "runbook_id": "runbook-checkout-api-stability",
+      "title": "Stabilize elevated error rates on Checkout API",
+      "excerpt": "Confirm symptom scope before escalating to downstream systems.",
+      "score": 0.87
+    }
+  ]
+}

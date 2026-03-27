@@ -49,6 +49,9 @@ class NodeExecutionContext(SchemaModel):
     workflow_type: str
     organization_id: str = "unknown-org"
     workspace_id: str = "unknown-workspace"
+    user_id: str | None = None
+    role: str | None = None
+    session_id: str | None = None
     subject_type: str | None = None
     subject_id: str | None = None
     current_state: str

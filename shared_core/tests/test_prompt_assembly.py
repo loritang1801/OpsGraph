@@ -35,6 +35,37 @@ class PromptAssemblyTests(unittest.TestCase):
             ["narrative.snapshot_read", "control_catalog.lookup", "export.snapshot_validate"],
         )
 
+    def test_mapper_prompt_assembly_includes_memory_context(self) -> None:
+        assembled = self.service.assemble(
+            bundle_id="auditflow.mapper",
+            bundle_version="2026-03-16.1",
+            sources=PromptAssemblySources(
+                workflow_state={
+                    "audit_cycle_id": "cycle-1",
+                    "evidence_item_id": "evidence-1",
+                },
+                retrieval={
+                    "evidence_chunk_refs": [
+                        {"kind": "artifact_chunk_preview", "artifact_id": "artifact-1", "chunk_index": 0}
+                    ]
+                },
+                database={
+                    "in_scope_controls": [{"control_code": "CC6.1", "title": "Access review"}],
+                    "framework_name": "SOC2",
+                },
+                memory={
+                    "accepted_pattern_memories": [
+                        {"memory_id": "memory-1", "decision": "accept", "control_code": "CC6.1"}
+                    ]
+                },
+            ),
+        )
+
+        self.assertEqual(assembled.resolved_variables["framework_name"], "SOC2")
+        self.assertEqual(len(assembled.resolved_variables["accepted_pattern_memories"]), 1)
+        memory_part = next(part for part in assembled.parts if part.name == "memory_context")
+        self.assertEqual(memory_part.variables["accepted_pattern_memories"][0]["control_code"], "CC6.1")
+
     def test_prompt_assembly_rejects_missing_required_variable(self) -> None:
         with self.assertRaises(PromptAssemblyError):
             self.service.assemble(

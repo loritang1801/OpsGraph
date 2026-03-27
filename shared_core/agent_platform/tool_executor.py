@@ -84,6 +84,7 @@ class ToolExecutor:
             ) from exc
 
         finished_at = datetime.now(UTC)
+        auth_context = call.authorization_context
         return ToolExecutionOutcome(
             envelope=envelope,
             trace=ToolExecutionTrace(
@@ -91,6 +92,14 @@ class ToolExecutor:
                 tool_name=tool.tool_name,
                 tool_version=tool.tool_version,
                 adapter_type=tool.adapter_type,
+                node_name=getattr(call, "node_name", None),
+                organization_id=getattr(auth_context, "organization_id", None),
+                workspace_id=getattr(auth_context, "workspace_id", None),
+                user_id=getattr(auth_context, "user_id", None),
+                role=getattr(auth_context, "role", None),
+                session_id=getattr(auth_context, "session_id", None),
+                subject_type=getattr(call, "subject_type", None),
+                subject_id=getattr(call, "subject_id", None),
                 status=envelope.status,
                 warnings=envelope.warnings,
                 started_at=started_at,

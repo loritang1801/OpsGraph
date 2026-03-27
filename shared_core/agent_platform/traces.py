@@ -23,6 +23,14 @@ class ToolExecutionTrace(SchemaModel):
     tool_name: str
     tool_version: str
     adapter_type: str
+    node_name: str | None = None
+    organization_id: str | None = None
+    workspace_id: str | None = None
+    user_id: str | None = None
+    role: str | None = None
+    session_id: str | None = None
+    subject_type: str | None = None
+    subject_id: str | None = None
     status: str
     warnings: list[str] = Field(default_factory=list)
     started_at: datetime

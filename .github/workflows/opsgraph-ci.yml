@@ -1,0 +1,52 @@
+# Generated from shared_core.agent_platform.product_ci.
+# Regenerate with: python .\scripts\render_ci_workflow.py
+name: OpsGraph CI
+
+on:
+  push:
+    paths:
+      - ".github/workflows/opsgraph-ci.yml"
+      - "pyproject.toml"
+      - "scripts/**"
+      - "schemas/**"
+      - "src/**"
+      - "shared_core/**"
+      - "tests/**"
+      - "README.md"
+      - "INTEGRATIONS.md"
+      - "PROMPT_TOOL.md"
+  pull_request:
+    paths:
+      - ".github/workflows/opsgraph-ci.yml"
+      - "pyproject.toml"
+      - "scripts/**"
+      - "schemas/**"
+      - "src/**"
+      - "shared_core/**"
+      - "tests/**"
+      - "README.md"
+      - "INTEGRATIONS.md"
+      - "PROMPT_TOOL.md"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[api]
+
+      - name: Run CI Checks
+        run: python scripts/run_ci_checks.py

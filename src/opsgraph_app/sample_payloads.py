@@ -15,6 +15,7 @@ def incident_response_payload() -> dict:
         "current_incident_candidates": [],
         "context_bundle_id": "context-1",
         "current_fact_set_version": 1,
+        "service_id": "checkout-api",
         "confirmed_fact_refs": [{"kind": "incident_fact", "id": "fact-1"}],
         "top_hypothesis_refs": [{"kind": "deployment", "id": "deploy-123"}],
         "target_channels": ["internal_slack"],

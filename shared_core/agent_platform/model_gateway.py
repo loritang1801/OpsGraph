@@ -96,6 +96,7 @@ class GatewayAgentInvoker:
                     tool_name=planned_call.tool_name,
                     tool_version=planned_call.tool_version,
                     workflow_run_id=context.workflow_run_id,
+                    node_name=context.node_name,
                     subject_type=context.subject_type or context.workflow_type,
                     subject_id=context.subject_id or context.workflow_run_id,
                     arguments=planned_call.arguments,
@@ -106,6 +107,9 @@ class GatewayAgentInvoker:
                     authorization_context=AuthorizationContext(
                         organization_id=context.organization_id,
                         workspace_id=context.workspace_id,
+                        user_id=context.user_id,
+                        role=context.role,
+                        session_id=context.session_id,
                     ),
                 )
             )

@@ -33,9 +33,21 @@ from .api_models import (
     ReplayCaseDetail,
     ReplayCaseSummary,
     ReplayBaselineSummary,
+    ReplayAdminAuditLogSummary,
     ReplayEvaluationSummary,
+    ReplayWorkerMonitorDefaultPresetResponse,
+    ReplayWorkerMonitorResolvedShiftResponse,
+    ReplayWorkerMonitorShiftDateRangeOverride,
+    ReplayWorkerMonitorShiftDateOverride,
+    ReplayWorkerMonitorShiftScheduleDeleteResponse,
+    ReplayWorkerMonitorShiftScheduleSummary,
+    ReplayWorkerMonitorShiftWindow,
+    ReplayWorkerMonitorPresetSummary,
     ReplayNodeDiffSummary,
     ReplayNodeSummary,
+    ReplayWorkerAlertPolicySummary,
+    ReplayWorkerHeartbeatSummary,
+    ReplayWorkerStatusSummary,
     RecommendationDecisionCommand,
     RecommendationDecisionResponse,
     RecommendationSummary,
@@ -69,6 +81,28 @@ class OpsGraphRepository(Protocol):
         action_type: str | None = None,
         actor_user_id: str | None = None,
     ) -> list[AuditLogSummary]: ...
+
+    def list_replay_admin_audit_logs(
+        self,
+        workspace_id: str,
+        *,
+        action_type: str | None = None,
+        actor_user_id: str | None = None,
+        request_id: str | None = None,
+    ) -> list[ReplayAdminAuditLogSummary]: ...
+
+    def record_replay_admin_audit_log(
+        self,
+        *,
+        workspace_id: str,
+        action_type: str,
+        subject_type: str | None,
+        subject_id: str | None,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+        request_payload: dict[str, object] | None = None,
+        result_payload: dict[str, object] | None = None,
+    ) -> ReplayAdminAuditLogSummary: ...
 
     def list_hypotheses(self, incident_id: str) -> list[HypothesisSummary]: ...
 
@@ -251,9 +285,19 @@ class OpsGraphRepository(Protocol):
         incident_id: str,
         workflow_run_id: str,
         checkpoint_seq: int,
+        triage_output: dict[str, object] | None = None,
+        investigation_output: dict[str, object] | None = None,
+        recommendation_output: dict[str, object] | None = None,
+        comms_output: dict[str, object] | None = None,
     ) -> dict[str, object]: ...
 
-    def record_retrospective_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None: ...
+    def record_retrospective_result(
+        self,
+        incident_id: str,
+        workflow_run_id: str,
+        checkpoint_seq: int,
+        postmortem_output: dict[str, object] | None = None,
+    ) -> None: ...
 
     def load_idempotency_response(
         self,
@@ -271,6 +315,111 @@ class OpsGraphRepository(Protocol):
         request_hash: str,
         response_payload: dict[str, object],
     ) -> None: ...
+
+    def record_replay_worker_heartbeat(
+        self,
+        *,
+        workspace_id: str,
+        status: str,
+        iteration: int,
+        attempted_count: int,
+        dispatched_count: int,
+        failed_count: int,
+        skipped_count: int,
+        idle_polls: int,
+        consecutive_failures: int,
+        remaining_queued_count: int,
+        error_message: str | None = None,
+    ) -> ReplayWorkerStatusSummary: ...
+
+    def get_replay_worker_alert_policy(self, workspace_id: str) -> ReplayWorkerAlertPolicySummary | None: ...
+
+    def list_replay_worker_monitor_presets(
+        self,
+        workspace_id: str,
+        *,
+        shift_label: str | None = None,
+    ) -> list[ReplayWorkerMonitorPresetSummary]: ...
+
+    def upsert_replay_worker_monitor_preset(
+        self,
+        *,
+        workspace_id: str,
+        preset_name: str,
+        history_limit: int,
+        actor_user_id: str | None,
+        request_id: str | None,
+        policy_audit_limit: int,
+        policy_audit_copy_format: str,
+        policy_audit_include_summary: bool,
+    ) -> ReplayWorkerMonitorPresetSummary: ...
+
+    def delete_replay_worker_monitor_preset(
+        self,
+        workspace_id: str,
+        preset_name: str,
+    ) -> ReplayWorkerMonitorPresetSummary | None: ...
+
+    def get_replay_worker_monitor_default_preset(
+        self,
+        workspace_id: str,
+        *,
+        shift_label: str | None = None,
+    ) -> ReplayWorkerMonitorDefaultPresetResponse | None: ...
+
+    def set_replay_worker_monitor_default_preset(
+        self,
+        workspace_id: str,
+        preset_name: str,
+        *,
+        shift_label: str | None = None,
+    ) -> ReplayWorkerMonitorDefaultPresetResponse: ...
+
+    def clear_replay_worker_monitor_default_preset(
+        self,
+        workspace_id: str,
+        *,
+        shift_label: str | None = None,
+    ) -> ReplayWorkerMonitorDefaultPresetResponse | None: ...
+
+    def get_replay_worker_monitor_shift_schedule(
+        self,
+        workspace_id: str,
+    ) -> ReplayWorkerMonitorShiftScheduleSummary | None: ...
+
+    def upsert_replay_worker_monitor_shift_schedule(
+        self,
+        workspace_id: str,
+        *,
+        timezone: str,
+        windows: list[ReplayWorkerMonitorShiftWindow],
+        date_overrides: list[ReplayWorkerMonitorShiftDateOverride],
+        date_range_overrides: list[ReplayWorkerMonitorShiftDateRangeOverride],
+    ) -> ReplayWorkerMonitorShiftScheduleSummary: ...
+
+    def clear_replay_worker_monitor_shift_schedule(
+        self,
+        workspace_id: str,
+    ) -> ReplayWorkerMonitorShiftScheduleDeleteResponse | None: ...
+
+    def upsert_replay_worker_alert_policy(
+        self,
+        *,
+        workspace_id: str,
+        warning_consecutive_failures: int,
+        critical_consecutive_failures: int,
+    ) -> ReplayWorkerAlertPolicySummary: ...
+
+    def delete_replay_worker_alert_policy(self, workspace_id: str) -> None: ...
+
+    def get_replay_worker_status(self, workspace_id: str | None = None) -> ReplayWorkerStatusSummary | None: ...
+
+    def list_replay_worker_history(
+        self,
+        workspace_id: str | None = None,
+        *,
+        limit: int = 5,
+    ) -> list[ReplayWorkerHeartbeatSummary]: ...
 
 
 class Base(DeclarativeBase):
@@ -386,6 +535,25 @@ class AuditLogRow(Base):
 
     audit_log_id: Mapped[str] = mapped_column(String(255), primary_key=True)
     incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    action_type: Mapped[str] = mapped_column(String(100), index=True)
+    actor_type: Mapped[str] = mapped_column(String(30), default="system")
+    actor_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    actor_role: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    subject_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    subject_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    request_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class ReplayAdminAuditLogRow(Base):
+    __tablename__ = "opsgraph_replay_admin_audit_log"
+
+    audit_log_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(255), index=True)
     action_type: Mapped[str] = mapped_column(String(100), index=True)
     actor_type: Mapped[str] = mapped_column(String(30), default="system")
     actor_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
@@ -521,6 +689,90 @@ class ReplayEvaluationRow(Base):
     node_diffs: Mapped[list[dict]] = mapped_column(JSON)
     report_artifact_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class ReplayWorkerStatusRow(Base):
+    __tablename__ = "opsgraph_replay_worker_status"
+
+    workspace_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    status: Mapped[str] = mapped_column(String(30))
+    iteration: Mapped[int] = mapped_column(Integer)
+    attempted_count: Mapped[int] = mapped_column(Integer)
+    dispatched_count: Mapped[int] = mapped_column(Integer)
+    failed_count: Mapped[int] = mapped_column(Integer)
+    skipped_count: Mapped[int] = mapped_column(Integer)
+    idle_polls: Mapped[int] = mapped_column(Integer)
+    consecutive_failures: Mapped[int] = mapped_column(Integer)
+    remaining_queued_count: Mapped[int] = mapped_column(Integer)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
+
+
+class ReplayWorkerAlertPolicyRow(Base):
+    __tablename__ = "opsgraph_replay_worker_alert_policy"
+
+    workspace_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    warning_consecutive_failures: Mapped[int] = mapped_column(Integer)
+    critical_consecutive_failures: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
+
+
+class ReplayWorkerMonitorPresetRow(Base):
+    __tablename__ = "opsgraph_replay_worker_monitor_preset"
+
+    workspace_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    preset_name: Mapped[str] = mapped_column(String(120), primary_key=True)
+    history_limit: Mapped[int] = mapped_column(Integer)
+    actor_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    policy_audit_limit: Mapped[int] = mapped_column(Integer)
+    policy_audit_copy_format: Mapped[str] = mapped_column(String(20))
+    policy_audit_include_summary: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
+
+
+class ReplayWorkerMonitorDefaultPresetRow(Base):
+    __tablename__ = "opsgraph_replay_worker_monitor_default_preset"
+
+    workspace_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    preset_name: Mapped[str] = mapped_column(String(120))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
+
+
+class ReplayWorkerMonitorShiftDefaultPresetRow(Base):
+    __tablename__ = "opsgraph_replay_worker_monitor_shift_default_preset"
+
+    workspace_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    shift_label: Mapped[str] = mapped_column(String(80), primary_key=True)
+    preset_name: Mapped[str] = mapped_column(String(120))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
+
+
+class ReplayWorkerMonitorShiftScheduleRow(Base):
+    __tablename__ = "opsgraph_replay_worker_monitor_shift_schedule"
+
+    workspace_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    timezone: Mapped[str] = mapped_column(String(80))
+    windows_json: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
+
+
+class ReplayWorkerHeartbeatRow(Base):
+    __tablename__ = "opsgraph_replay_worker_heartbeat"
+
+    heartbeat_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(255), index=True)
+    status: Mapped[str] = mapped_column(String(30))
+    iteration: Mapped[int] = mapped_column(Integer)
+    attempted_count: Mapped[int] = mapped_column(Integer)
+    dispatched_count: Mapped[int] = mapped_column(Integer)
+    failed_count: Mapped[int] = mapped_column(Integer)
+    skipped_count: Mapped[int] = mapped_column(Integer)
+    idle_polls: Mapped[int] = mapped_column(Integer)
+    consecutive_failures: Mapped[int] = mapped_column(Integer)
+    remaining_queued_count: Mapped[int] = mapped_column(Integer)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    emitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
 
 
 def create_opsgraph_tables(engine: Engine) -> None:
@@ -659,6 +911,61 @@ class SqlAlchemyOpsGraphRepository:
             return {}
         return json.loads(json.dumps(value, sort_keys=True, default=str))
 
+    @staticmethod
+    def _structured_items(
+        payload: dict[str, object] | None,
+        key: str,
+    ) -> list[dict[str, object]]:
+        if not isinstance(payload, dict):
+            return []
+        raw_items = payload.get(key)
+        if not isinstance(raw_items, list):
+            return []
+        return [dict(item) for item in raw_items if isinstance(item, dict)]
+
+    @staticmethod
+    def _normalize_refs(
+        refs: object,
+        *,
+        fallback_kind: str,
+        fallback_id: str,
+    ) -> list[dict]:
+        normalized = [
+            {
+                "kind": str(item.get("kind") or fallback_kind),
+                "id": str(item.get("id") or fallback_id),
+            }
+            for item in (refs or [])
+            if isinstance(item, dict) and (item.get("id") or fallback_id)
+        ]
+        return normalized or [{"kind": fallback_kind, "id": fallback_id}]
+
+    @staticmethod
+    def _coerce_text(value: object, *, default: str) -> str:
+        if value in {None, ""}:
+            return default
+        return str(value)
+
+    @staticmethod
+    def _coerce_int(value: object, *, default: int) -> int:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _coerce_float(value: object, *, default: float) -> float:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _draft_title(incident_title: str, channel: str) -> str:
+        if channel == "internal_slack":
+            return f"{incident_title} internal update"
+        return f"{incident_title} {channel} update"
+
     def _timeline_event(
         self,
         *,
@@ -703,6 +1010,55 @@ class SqlAlchemyOpsGraphRepository:
             AuditLogRow(
                 audit_log_id=f"audit-{uuid4().hex[:10]}",
                 incident_id=incident_id,
+                action_type=action_type,
+                actor_type=str(context.get("actor_type") or "system"),
+                actor_user_id=(
+                    str(context["actor_user_id"])
+                    if context.get("actor_user_id") is not None
+                    else None
+                ),
+                actor_role=(
+                    str(context["actor_role"])
+                    if context.get("actor_role") is not None
+                    else None
+                ),
+                session_id=(
+                    str(context["session_id"])
+                    if context.get("session_id") is not None
+                    else None
+                ),
+                request_id=(
+                    str(context["request_id"])
+                    if context.get("request_id") is not None
+                    else None
+                ),
+                idempotency_key=idempotency_key,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                request_payload=self._json_payload(request_payload),
+                result_payload=self._json_payload(result_payload),
+                created_at=self._utcnow_naive(),
+            )
+        )
+
+    def _append_replay_admin_audit_log(
+        self,
+        session: Session,
+        *,
+        workspace_id: str,
+        action_type: str,
+        subject_type: str | None,
+        subject_id: str | None,
+        actor_context: dict[str, object] | None,
+        idempotency_key: str | None,
+        request_payload: dict[str, object] | None,
+        result_payload: dict[str, object] | None,
+    ) -> None:
+        context = actor_context or {}
+        session.add(
+            ReplayAdminAuditLogRow(
+                audit_log_id=f"replay-audit-{uuid4().hex[:10]}",
+                workspace_id=workspace_id,
                 action_type=action_type,
                 actor_type=str(context.get("actor_type") or "system"),
                 actor_user_id=(
@@ -830,6 +1186,25 @@ class SqlAlchemyOpsGraphRepository:
         return AuditLogSummary(
             audit_log_id=row.audit_log_id,
             incident_id=row.incident_id,
+            action_type=row.action_type,
+            actor_type=row.actor_type,
+            actor_user_id=row.actor_user_id,
+            actor_role=row.actor_role,
+            session_id=row.session_id,
+            request_id=row.request_id,
+            idempotency_key=row.idempotency_key,
+            subject_type=row.subject_type,
+            subject_id=row.subject_id,
+            request_payload=dict(row.request_payload or {}),
+            result_payload=dict(row.result_payload or {}),
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_replay_admin_audit_log(row: ReplayAdminAuditLogRow) -> ReplayAdminAuditLogSummary:
+        return ReplayAdminAuditLogSummary(
+            audit_log_id=row.audit_log_id,
+            workspace_id=row.workspace_id,
             action_type=row.action_type,
             actor_type=row.actor_type,
             actor_user_id=row.actor_user_id,
@@ -983,6 +1358,112 @@ class SqlAlchemyOpsGraphRepository:
             created_at=row.created_at,
         )
 
+    @staticmethod
+    def _to_replay_worker_status(row: ReplayWorkerStatusRow) -> ReplayWorkerStatusSummary:
+        return ReplayWorkerStatusSummary(
+            workspace_id=row.workspace_id,
+            status=row.status,
+            iteration=row.iteration,
+            attempted_count=row.attempted_count,
+            dispatched_count=row.dispatched_count,
+            failed_count=row.failed_count,
+            skipped_count=row.skipped_count,
+            idle_polls=row.idle_polls,
+            consecutive_failures=row.consecutive_failures,
+            remaining_queued_count=row.remaining_queued_count,
+            error_message=row.error_message,
+            last_seen_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_replay_worker_alert_policy(row: ReplayWorkerAlertPolicyRow) -> ReplayWorkerAlertPolicySummary:
+        return ReplayWorkerAlertPolicySummary(
+            workspace_id=row.workspace_id,
+            warning_consecutive_failures=row.warning_consecutive_failures,
+            critical_consecutive_failures=row.critical_consecutive_failures,
+            source="workspace_override",
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_replay_worker_monitor_preset(row: ReplayWorkerMonitorPresetRow) -> ReplayWorkerMonitorPresetSummary:
+        return ReplayWorkerMonitorPresetSummary(
+            workspace_id=row.workspace_id,
+            preset_name=row.preset_name,
+            history_limit=row.history_limit,
+            actor_user_id=row.actor_user_id,
+            request_id=row.request_id,
+            policy_audit_limit=row.policy_audit_limit,
+            policy_audit_copy_format=row.policy_audit_copy_format,
+            policy_audit_include_summary=row.policy_audit_include_summary,
+            is_default=False,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_replay_worker_monitor_default_preset(
+        row: ReplayWorkerMonitorDefaultPresetRow,
+    ) -> ReplayWorkerMonitorDefaultPresetResponse:
+        return ReplayWorkerMonitorDefaultPresetResponse(
+            workspace_id=row.workspace_id,
+            preset_name=row.preset_name,
+            shift_label=None,
+            source="workspace_default",
+            updated_at=row.updated_at,
+            cleared=False,
+        )
+
+    @staticmethod
+    def _to_replay_worker_monitor_shift_schedule(
+        row: ReplayWorkerMonitorShiftScheduleRow,
+    ) -> ReplayWorkerMonitorShiftScheduleSummary:
+        raw_payload = json.loads(row.windows_json or "[]")
+        if isinstance(raw_payload, dict):
+            raw_windows = raw_payload.get("windows", [])
+            raw_date_overrides = raw_payload.get("date_overrides", [])
+            raw_date_range_overrides = raw_payload.get("date_range_overrides", [])
+        else:
+            raw_windows = raw_payload
+            raw_date_overrides = []
+            raw_date_range_overrides = []
+        windows = [
+            ReplayWorkerMonitorShiftWindow.model_validate(window)
+            for window in raw_windows
+        ]
+        date_overrides = [
+            ReplayWorkerMonitorShiftDateOverride.model_validate(override)
+            for override in raw_date_overrides
+        ]
+        date_range_overrides = [
+            ReplayWorkerMonitorShiftDateRangeOverride.model_validate(override)
+            for override in raw_date_range_overrides
+        ]
+        return ReplayWorkerMonitorShiftScheduleSummary(
+            workspace_id=row.workspace_id,
+            timezone=row.timezone,
+            windows=windows,
+            date_overrides=date_overrides,
+            date_range_overrides=date_range_overrides,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_replay_worker_heartbeat(row: ReplayWorkerHeartbeatRow) -> ReplayWorkerHeartbeatSummary:
+        return ReplayWorkerHeartbeatSummary(
+            workspace_id=row.workspace_id,
+            status=row.status,
+            iteration=row.iteration,
+            attempted_count=row.attempted_count,
+            dispatched_count=row.dispatched_count,
+            failed_count=row.failed_count,
+            skipped_count=row.skipped_count,
+            idle_polls=row.idle_polls,
+            consecutive_failures=row.consecutive_failures,
+            remaining_queued_count=row.remaining_queued_count,
+            error_message=row.error_message,
+            emitted_at=row.emitted_at,
+        )
+
     def list_incidents(
         self,
         workspace_id: str,
@@ -1076,6 +1557,57 @@ class SqlAlchemyOpsGraphRepository:
                 stmt = stmt.where(AuditLogRow.actor_user_id == actor_user_id)
             rows = session.scalars(stmt.order_by(AuditLogRow.created_at.desc())).all()
             return [self._to_audit_log(row) for row in rows]
+
+    def list_replay_admin_audit_logs(
+        self,
+        workspace_id: str,
+        *,
+        action_type: str | None = None,
+        actor_user_id: str | None = None,
+        request_id: str | None = None,
+    ) -> list[ReplayAdminAuditLogSummary]:
+        with self.session_factory() as session:
+            stmt = select(ReplayAdminAuditLogRow).where(ReplayAdminAuditLogRow.workspace_id == workspace_id)
+            if action_type is not None:
+                stmt = stmt.where(ReplayAdminAuditLogRow.action_type == action_type)
+            if actor_user_id is not None:
+                stmt = stmt.where(ReplayAdminAuditLogRow.actor_user_id == actor_user_id)
+            if request_id is not None:
+                stmt = stmt.where(ReplayAdminAuditLogRow.request_id == request_id)
+            rows = session.scalars(stmt.order_by(ReplayAdminAuditLogRow.created_at.desc())).all()
+            return [self._to_replay_admin_audit_log(row) for row in rows]
+
+    def record_replay_admin_audit_log(
+        self,
+        *,
+        workspace_id: str,
+        action_type: str,
+        subject_type: str | None,
+        subject_id: str | None,
+        actor_context: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+        request_payload: dict[str, object] | None = None,
+        result_payload: dict[str, object] | None = None,
+    ) -> ReplayAdminAuditLogSummary:
+        with self.session_factory.begin() as session:
+            self._append_replay_admin_audit_log(
+                session,
+                workspace_id=workspace_id,
+                action_type=action_type,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                actor_context=actor_context,
+                idempotency_key=idempotency_key,
+                request_payload=request_payload,
+                result_payload=result_payload,
+            )
+            row = session.scalars(
+                select(ReplayAdminAuditLogRow)
+                .where(ReplayAdminAuditLogRow.workspace_id == workspace_id)
+                .order_by(ReplayAdminAuditLogRow.created_at.desc())
+            ).first()
+            assert row is not None
+            return self._to_replay_admin_audit_log(row)
 
     def list_hypotheses(self, incident_id: str) -> list[HypothesisSummary]:
         with self.session_factory() as session:
@@ -2655,41 +3187,105 @@ class SqlAlchemyOpsGraphRepository:
         incident_id: str,
         workflow_run_id: str,
         checkpoint_seq: int,
+        triage_output: dict[str, object] | None = None,
+        investigation_output: dict[str, object] | None = None,
+        recommendation_output: dict[str, object] | None = None,
+        comms_output: dict[str, object] | None = None,
     ) -> dict[str, object]:
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
                 raise KeyError(incident_id)
+            now = self._utcnow_naive()
             incident_row.incident_status = (
                 "responding" if checkpoint_seq < 4 else "resolved_pending_confirmation"
             )
-            incident_row.severity = "sev1"
+            if isinstance(triage_output, dict):
+                incident_row.severity = self._coerce_text(
+                    triage_output.get("severity"),
+                    default=incident_row.severity,
+                )
+                incident_row.title = self._coerce_text(
+                    triage_output.get("title"),
+                    default=incident_row.title,
+                )
+                triage_service_id = triage_output.get("service_id")
+                if triage_service_id not in {None, ""}:
+                    incident_row.service_name = str(triage_service_id)
+            else:
+                incident_row.severity = "sev1"
             incident_row.latest_workflow_run_id = workflow_run_id
-            incident_row.updated_at = self._utcnow_naive()
+            incident_row.updated_at = now
             generated_hypothesis_ids: list[str] = []
             generated_recommendation_id: str | None = None
             generated_approval_task_id: str | None = None
             generated_draft_id: str | None = None
+            generated_draft_channel: str | None = None
+            generated_draft_fact_set_version: int | None = None
 
-            hypothesis_exists = session.scalar(
-                select(HypothesisRow.hypothesis_id).where(HypothesisRow.incident_id == incident_id).limit(1)
+            existing_hypothesis_id = session.scalar(
+                select(HypothesisRow.hypothesis_id)
+                .where(HypothesisRow.incident_id == incident_id)
+                .limit(1)
             )
-            if hypothesis_exists is None:
-                generated_hypothesis_ids.append("hypothesis-generated-1")
-                session.add(
-                    HypothesisRow(
-                        hypothesis_id="hypothesis-generated-1",
-                        incident_id=incident_id,
-                        status="proposed",
-                        rank=1,
-                        confidence=0.73,
-                        title="Generated incident hypothesis",
-                        rationale="Workflow generated a top-ranked root-cause candidate.",
-                        evidence_refs=[],
-                        created_at=self._utcnow_naive(),
-                        updated_at=self._utcnow_naive(),
+            if existing_hypothesis_id is None:
+                hypothesis_payloads = self._structured_items(investigation_output, "hypotheses")
+                if not hypothesis_payloads:
+                    hypothesis_payloads = [
+                        {
+                            "title": "Generated incident hypothesis",
+                            "confidence": 0.73,
+                            "rank": 1,
+                            "evidence_refs": [],
+                            "verification_steps": [],
+                        }
+                    ]
+                for index, payload in enumerate(hypothesis_payloads, start=1):
+                    hypothesis_id = f"hypothesis-{uuid4().hex[:8]}"
+                    verification_steps = self._structured_items(payload, "verification_steps")
+                    verification_text = "; ".join(
+                        self._coerce_text(
+                            step.get("instruction_text"),
+                            default="verify against current telemetry",
+                        )
+                        for step in verification_steps
                     )
+                    rationale = "Workflow investigation proposed this hypothesis."
+                    if verification_text:
+                        rationale = f"{rationale} Verify via: {verification_text}"
+                    session.add(
+                        HypothesisRow(
+                            hypothesis_id=hypothesis_id,
+                            incident_id=incident_id,
+                            status="proposed",
+                            rank=self._coerce_int(payload.get("rank"), default=index),
+                            confidence=self._coerce_float(payload.get("confidence"), default=0.73),
+                            title=self._coerce_text(
+                                payload.get("title"),
+                                default="Generated incident hypothesis",
+                            ),
+                            rationale=rationale,
+                            evidence_refs=self._normalize_refs(
+                                payload.get("evidence_refs"),
+                                fallback_kind="incident_fact",
+                                fallback_id="fact-unknown",
+                            ),
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    generated_hypothesis_ids.append(hypothesis_id)
+
+            selected_hypothesis_id = (
+                generated_hypothesis_ids[0]
+                if generated_hypothesis_ids
+                else session.scalar(
+                    select(HypothesisRow.hypothesis_id)
+                    .where(HypothesisRow.incident_id == incident_id)
+                    .order_by(HypothesisRow.rank.asc(), HypothesisRow.updated_at.desc())
+                    .limit(1)
                 )
+            )
 
             recommendation_row = session.scalars(
                 select(RecommendationRow)
@@ -2699,65 +3295,126 @@ class SqlAlchemyOpsGraphRepository:
             ).first()
             approval_task_id = recommendation_row.approval_task_id if recommendation_row is not None else None
             if recommendation_row is None:
-                approval_task_id = f"approval-task-{uuid4().hex[:8]}"
-                generated_recommendation_id = "recommendation-generated-1"
+                recommendation_payloads = self._structured_items(recommendation_output, "recommendations")
+                recommendation_payload = (
+                    recommendation_payloads[0]
+                    if recommendation_payloads
+                    else {
+                        "risk_level": "medium",
+                        "requires_approval": True,
+                        "title": "Scale checkout workers",
+                        "instructions_markdown": "Scale worker pool and watch queue depth.",
+                        "evidence_refs": [],
+                    }
+                )
+                generated_recommendation_id = f"recommendation-{uuid4().hex[:8]}"
+                requires_approval = bool(recommendation_payload.get("requires_approval", True))
+                approval_task_id = f"approval-task-{uuid4().hex[:8]}" if requires_approval else None
                 generated_approval_task_id = approval_task_id
                 session.add(
                     RecommendationRow(
-                        recommendation_id="recommendation-generated-1",
+                        recommendation_id=generated_recommendation_id,
                         incident_id=incident_id,
-                        hypothesis_id="hypothesis-generated-1",
-                        title="Scale checkout workers",
-                        risk_level="medium",
-                        approval_required=True,
-                        status="pending_approval",
+                        hypothesis_id=(
+                            str(selected_hypothesis_id)
+                            if selected_hypothesis_id not in {None, ""}
+                            else None
+                        ),
+                        title=self._coerce_text(
+                            recommendation_payload.get("title"),
+                            default="Scale checkout workers",
+                        ),
+                        risk_level=self._coerce_text(
+                            recommendation_payload.get("risk_level"),
+                            default="medium",
+                        ),
+                        approval_required=requires_approval,
+                        status="pending_approval" if requires_approval else "approved",
                         approval_task_id=approval_task_id,
-                        instructions_markdown="Scale worker pool and watch queue depth.",
-                        source_refs=[],
-                        created_at=self._utcnow_naive(),
-                        updated_at=self._utcnow_naive(),
+                        instructions_markdown=self._coerce_text(
+                            recommendation_payload.get("instructions_markdown"),
+                            default="Scale worker pool and watch queue depth.",
+                        ),
+                        source_refs=self._normalize_refs(
+                            recommendation_payload.get("evidence_refs"),
+                            fallback_kind="incident_fact",
+                            fallback_id="fact-unknown",
+                        ),
+                        created_at=now,
+                        updated_at=now,
                     )
                 )
-                session.add(
-                    ApprovalTaskRow(
-                        approval_task_id=approval_task_id,
-                        incident_id=incident_id,
-                        recommendation_id="recommendation-generated-1",
-                        status="pending",
-                        comment=None,
-                        created_at=self._utcnow_naive(),
-                        updated_at=self._utcnow_naive(),
+                if approval_task_id is not None:
+                    session.add(
+                        ApprovalTaskRow(
+                            approval_task_id=approval_task_id,
+                            incident_id=incident_id,
+                            recommendation_id=generated_recommendation_id,
+                            status="pending",
+                            comment=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
                     )
-                )
-            comms_exists = session.scalar(
-                select(CommsDraftRow.draft_id).where(CommsDraftRow.incident_id == incident_id).limit(1)
-            )
-            if comms_exists is None:
-                generated_draft_id = "draft-generated-1"
-                session.add(
-                    CommsDraftRow(
-                        draft_id="draft-generated-1",
-                        incident_id=incident_id,
-                        channel="internal_slack",
-                        title="Generated incident update",
-                        status="draft",
-                        fact_set_version=incident_row.current_fact_set_version,
-                        approval_task_id=approval_task_id,
-                        published_message_ref=None,
-                        created_at=self._utcnow_naive(),
-                        updated_at=self._utcnow_naive(),
+
+            existing_draft_ids = session.scalars(
+                select(CommsDraftRow.draft_id)
+                .where(CommsDraftRow.incident_id == incident_id)
+                .order_by(CommsDraftRow.created_at.asc())
+            ).all()
+            if not existing_draft_ids:
+                draft_payloads = self._structured_items(comms_output, "drafts")
+                if not draft_payloads:
+                    draft_payloads = [
+                        {
+                            "channel_type": "internal_slack",
+                            "fact_set_version": incident_row.current_fact_set_version,
+                        }
+                    ]
+                for draft_payload in draft_payloads:
+                    draft_id = f"draft-{uuid4().hex[:8]}"
+                    channel = self._coerce_text(
+                        draft_payload.get("channel_type"),
+                        default="internal_slack",
                     )
-                )
+                    fact_set_version = self._coerce_int(
+                        draft_payload.get("fact_set_version"),
+                        default=incident_row.current_fact_set_version,
+                    )
+                    session.add(
+                        CommsDraftRow(
+                            draft_id=draft_id,
+                            incident_id=incident_id,
+                            channel=channel,
+                            title=self._draft_title(incident_row.title, channel),
+                            status="draft",
+                            fact_set_version=fact_set_version,
+                            approval_task_id=approval_task_id,
+                            published_message_ref=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    if generated_draft_id is None:
+                        generated_draft_id = draft_id
+                        generated_draft_channel = channel
+                        generated_draft_fact_set_version = fact_set_version
             return {
                 "generated_hypothesis_ids": generated_hypothesis_ids,
                 "recommendation_id": generated_recommendation_id,
                 "approval_task_id": generated_approval_task_id,
                 "draft_id": generated_draft_id,
-                "draft_channel": "internal_slack" if generated_draft_id is not None else None,
-                "draft_fact_set_version": incident_row.current_fact_set_version if generated_draft_id is not None else None,
+                "draft_channel": generated_draft_channel,
+                "draft_fact_set_version": generated_draft_fact_set_version,
             }
 
-    def record_retrospective_result(self, incident_id: str, workflow_run_id: str, checkpoint_seq: int) -> None:
+    def record_retrospective_result(
+        self,
+        incident_id: str,
+        workflow_run_id: str,
+        checkpoint_seq: int,
+        postmortem_output: dict[str, object] | None = None,
+    ) -> None:
         now = datetime.now(UTC)
         with self.session_factory.begin() as session:
             incident_row = session.get(IncidentRow, incident_id)
@@ -2849,6 +3506,32 @@ class SqlAlchemyOpsGraphRepository:
                             "fact_set_version": incident_row.current_fact_set_version,
                             "workflow_run_id": workflow_run_id,
                             "replay_case_id": replay_case_id,
+                            "postmortem_markdown": self._coerce_text(
+                                (
+                                    postmortem_output.get("postmortem_markdown")
+                                    if isinstance(postmortem_output, dict)
+                                    else None
+                                ),
+                                default=(
+                                    f"# {incident_row.incident_key}\n\n"
+                                    f"{incident_row.title}\n\n"
+                                    f"Resolution summary: {incident_row.incident_status}"
+                                ),
+                            ),
+                            "follow_up_actions": self._structured_items(
+                                postmortem_output,
+                                "follow_up_actions",
+                            ),
+                            "replay_capture_hints": [
+                                str(item)
+                                for item in (
+                                    postmortem_output.get("replay_capture_hints")
+                                    if isinstance(postmortem_output, dict)
+                                    and isinstance(postmortem_output.get("replay_capture_hints"), list)
+                                    else []
+                                )
+                                if item
+                            ],
                             "facts": [
                                 {
                                     "fact_id": row.fact_id,
@@ -2872,6 +3555,21 @@ class SqlAlchemyOpsGraphRepository:
                         "incident_id": incident_id,
                         "postmortem_id": postmortem_row.postmortem_id,
                         "replay_case_id": replay_case_id,
+                        "follow_up_action_count": len(
+                            self._structured_items(postmortem_output, "follow_up_actions")
+                        ),
+                        "replay_hint_count": len(
+                            [
+                                item
+                                for item in (
+                                    postmortem_output.get("replay_capture_hints")
+                                    if isinstance(postmortem_output, dict)
+                                    and isinstance(postmortem_output.get("replay_capture_hints"), list)
+                                    else []
+                                )
+                                if item
+                            ]
+                        ),
                     },
                     created_at=now,
                     updated_at=now,
@@ -2938,6 +3636,401 @@ class SqlAlchemyOpsGraphRepository:
                 )
             )
 
+    def record_replay_worker_heartbeat(
+        self,
+        *,
+        workspace_id: str,
+        status: str,
+        iteration: int,
+        attempted_count: int,
+        dispatched_count: int,
+        failed_count: int,
+        skipped_count: int,
+        idle_polls: int,
+        consecutive_failures: int,
+        remaining_queued_count: int,
+        emitted_at: datetime | None = None,
+        error_message: str | None = None,
+    ) -> ReplayWorkerStatusSummary:
+        now = self._normalize_timestamp(emitted_at) or self._utcnow_naive()
+        with self.session_factory.begin() as session:
+            row = session.get(ReplayWorkerStatusRow, workspace_id)
+            if row is None:
+                row = ReplayWorkerStatusRow(workspace_id=workspace_id)
+                session.add(row)
+            row.status = status
+            row.iteration = iteration
+            row.attempted_count = attempted_count
+            row.dispatched_count = dispatched_count
+            row.failed_count = failed_count
+            row.skipped_count = skipped_count
+            row.idle_polls = idle_polls
+            row.consecutive_failures = consecutive_failures
+            row.remaining_queued_count = remaining_queued_count
+            row.error_message = error_message
+            row.updated_at = now
+            session.add(
+                ReplayWorkerHeartbeatRow(
+                    heartbeat_id=f"heartbeat-{uuid4().hex[:12]}",
+                    workspace_id=workspace_id,
+                    status=status,
+                    iteration=iteration,
+                    attempted_count=attempted_count,
+                    dispatched_count=dispatched_count,
+                    failed_count=failed_count,
+                    skipped_count=skipped_count,
+                    idle_polls=idle_polls,
+                    consecutive_failures=consecutive_failures,
+                    remaining_queued_count=remaining_queued_count,
+                    error_message=error_message,
+                    emitted_at=now,
+                )
+            )
+            session.flush()
+            return self._to_replay_worker_status(row)
+
+    def get_replay_worker_alert_policy(self, workspace_id: str) -> ReplayWorkerAlertPolicySummary | None:
+        with self.session_factory() as session:
+            row = session.get(ReplayWorkerAlertPolicyRow, workspace_id)
+            if row is None:
+                return None
+            return self._to_replay_worker_alert_policy(row)
+
+    def list_replay_worker_monitor_presets(
+        self,
+        workspace_id: str,
+        *,
+        shift_label: str | None = None,
+    ) -> list[ReplayWorkerMonitorPresetSummary]:
+        with self.session_factory() as session:
+            shift_default_row = (
+                session.get(
+                    ReplayWorkerMonitorShiftDefaultPresetRow,
+                    (workspace_id, shift_label),
+                )
+                if shift_label is not None
+                else None
+            )
+            default_row = session.get(ReplayWorkerMonitorDefaultPresetRow, workspace_id)
+            if shift_default_row is not None:
+                default_preset_name = shift_default_row.preset_name
+                default_source = "shift_default"
+            elif default_row is not None:
+                default_preset_name = default_row.preset_name
+                default_source = "workspace_default"
+            else:
+                default_preset_name = None
+                default_source = "none"
+            rows = session.scalars(
+                select(ReplayWorkerMonitorPresetRow)
+                .where(ReplayWorkerMonitorPresetRow.workspace_id == workspace_id)
+                .order_by(ReplayWorkerMonitorPresetRow.preset_name.asc())
+            ).all()
+            return [
+                self._to_replay_worker_monitor_preset(row).model_copy(
+                    update={
+                        "is_default": row.preset_name == default_preset_name,
+                        "default_source": (
+                            default_source if row.preset_name == default_preset_name else "none"
+                        ),
+                    }
+                )
+                for row in rows
+            ]
+
+    def upsert_replay_worker_monitor_preset(
+        self,
+        *,
+        workspace_id: str,
+        preset_name: str,
+        history_limit: int,
+        actor_user_id: str | None,
+        request_id: str | None,
+        policy_audit_limit: int,
+        policy_audit_copy_format: str,
+        policy_audit_include_summary: bool,
+    ) -> ReplayWorkerMonitorPresetSummary:
+        now = self._utcnow_naive()
+        with self.session_factory.begin() as session:
+            row = session.get(ReplayWorkerMonitorPresetRow, (workspace_id, preset_name))
+            if row is None:
+                row = ReplayWorkerMonitorPresetRow(
+                    workspace_id=workspace_id,
+                    preset_name=preset_name,
+                )
+                session.add(row)
+            row.history_limit = history_limit
+            row.actor_user_id = actor_user_id
+            row.request_id = request_id
+            row.policy_audit_limit = policy_audit_limit
+            row.policy_audit_copy_format = policy_audit_copy_format
+            row.policy_audit_include_summary = policy_audit_include_summary
+            row.updated_at = now
+            session.flush()
+            default_row = session.get(ReplayWorkerMonitorDefaultPresetRow, workspace_id)
+            return self._to_replay_worker_monitor_preset(row).model_copy(
+                update={
+                    "is_default": (
+                        default_row is not None
+                        and default_row.preset_name == preset_name
+                    ),
+                    "default_source": (
+                        "workspace_default"
+                        if default_row is not None and default_row.preset_name == preset_name
+                        else "none"
+                    ),
+                }
+            )
+
+    def delete_replay_worker_monitor_preset(
+        self,
+        workspace_id: str,
+        preset_name: str,
+    ) -> ReplayWorkerMonitorPresetSummary | None:
+        with self.session_factory.begin() as session:
+            row = session.get(ReplayWorkerMonitorPresetRow, (workspace_id, preset_name))
+            if row is None:
+                return None
+            shift_default_rows = session.scalars(
+                select(ReplayWorkerMonitorShiftDefaultPresetRow)
+                .where(ReplayWorkerMonitorShiftDefaultPresetRow.workspace_id == workspace_id)
+                .where(ReplayWorkerMonitorShiftDefaultPresetRow.preset_name == preset_name)
+            ).all()
+            default_row = session.get(ReplayWorkerMonitorDefaultPresetRow, workspace_id)
+            summary = self._to_replay_worker_monitor_preset(row).model_copy(
+                update={
+                    "is_default": (
+                        default_row is not None
+                        and default_row.preset_name == preset_name
+                    )
+                }
+            )
+            if default_row is not None and default_row.preset_name == preset_name:
+                session.delete(default_row)
+            for shift_default_row in shift_default_rows:
+                session.delete(shift_default_row)
+            session.delete(row)
+            return summary
+
+    def get_replay_worker_monitor_default_preset(
+        self,
+        workspace_id: str,
+        *,
+        shift_label: str | None = None,
+    ) -> ReplayWorkerMonitorDefaultPresetResponse | None:
+        with self.session_factory() as session:
+            if shift_label is not None:
+                shift_row = session.get(
+                    ReplayWorkerMonitorShiftDefaultPresetRow,
+                    (workspace_id, shift_label),
+                )
+                if shift_row is not None:
+                    return ReplayWorkerMonitorDefaultPresetResponse(
+                        workspace_id=workspace_id,
+                        preset_name=shift_row.preset_name,
+                        shift_label=shift_label,
+                        source="shift_default",
+                        updated_at=shift_row.updated_at,
+                        cleared=False,
+                    )
+            row = session.get(ReplayWorkerMonitorDefaultPresetRow, workspace_id)
+            if row is None:
+                return None
+            return self._to_replay_worker_monitor_default_preset(row).model_copy(
+                update={"shift_label": shift_label}
+            )
+
+    def set_replay_worker_monitor_default_preset(
+        self,
+        workspace_id: str,
+        preset_name: str,
+        *,
+        shift_label: str | None = None,
+    ) -> ReplayWorkerMonitorDefaultPresetResponse:
+        now = self._utcnow_naive()
+        with self.session_factory.begin() as session:
+            preset_row = session.get(ReplayWorkerMonitorPresetRow, (workspace_id, preset_name))
+            if preset_row is None:
+                raise KeyError(preset_name)
+            if shift_label is not None:
+                row = session.get(
+                    ReplayWorkerMonitorShiftDefaultPresetRow,
+                    (workspace_id, shift_label),
+                )
+                if row is None:
+                    row = ReplayWorkerMonitorShiftDefaultPresetRow(
+                        workspace_id=workspace_id,
+                        shift_label=shift_label,
+                    )
+                    session.add(row)
+                row.preset_name = preset_name
+                row.updated_at = now
+                session.flush()
+                return ReplayWorkerMonitorDefaultPresetResponse(
+                    workspace_id=workspace_id,
+                    preset_name=preset_name,
+                    shift_label=shift_label,
+                    source="shift_default",
+                    updated_at=row.updated_at,
+                    cleared=False,
+                )
+            row = session.get(ReplayWorkerMonitorDefaultPresetRow, workspace_id)
+            if row is None:
+                row = ReplayWorkerMonitorDefaultPresetRow(workspace_id=workspace_id)
+                session.add(row)
+            row.preset_name = preset_name
+            row.updated_at = now
+            session.flush()
+            return self._to_replay_worker_monitor_default_preset(row)
+
+    def clear_replay_worker_monitor_default_preset(
+        self,
+        workspace_id: str,
+        *,
+        shift_label: str | None = None,
+    ) -> ReplayWorkerMonitorDefaultPresetResponse | None:
+        with self.session_factory.begin() as session:
+            if shift_label is not None:
+                shift_row = session.get(
+                    ReplayWorkerMonitorShiftDefaultPresetRow,
+                    (workspace_id, shift_label),
+                )
+                if shift_row is not None:
+                    response = ReplayWorkerMonitorDefaultPresetResponse(
+                        workspace_id=workspace_id,
+                        preset_name=shift_row.preset_name,
+                        shift_label=shift_label,
+                        source="shift_default",
+                        updated_at=shift_row.updated_at,
+                        cleared=True,
+                    )
+                    session.delete(shift_row)
+                    return response
+                return None
+            row = session.get(ReplayWorkerMonitorDefaultPresetRow, workspace_id)
+            if row is None:
+                return None
+            response = ReplayWorkerMonitorDefaultPresetResponse(
+                workspace_id=workspace_id,
+                preset_name=row.preset_name,
+                shift_label=shift_label,
+                source="workspace_default",
+                updated_at=row.updated_at,
+                cleared=True,
+            )
+            session.delete(row)
+            return response
+
+    def get_replay_worker_monitor_shift_schedule(
+        self,
+        workspace_id: str,
+    ) -> ReplayWorkerMonitorShiftScheduleSummary | None:
+        with self.session_factory() as session:
+            row = session.get(ReplayWorkerMonitorShiftScheduleRow, workspace_id)
+            if row is None:
+                return None
+            return self._to_replay_worker_monitor_shift_schedule(row)
+
+    def upsert_replay_worker_monitor_shift_schedule(
+        self,
+        workspace_id: str,
+        *,
+        timezone: str,
+        windows: list[ReplayWorkerMonitorShiftWindow],
+        date_overrides: list[ReplayWorkerMonitorShiftDateOverride],
+        date_range_overrides: list[ReplayWorkerMonitorShiftDateRangeOverride],
+    ) -> ReplayWorkerMonitorShiftScheduleSummary:
+        now = self._utcnow_naive()
+        with self.session_factory.begin() as session:
+            row = session.get(ReplayWorkerMonitorShiftScheduleRow, workspace_id)
+            if row is None:
+                row = ReplayWorkerMonitorShiftScheduleRow(workspace_id=workspace_id)
+                session.add(row)
+            row.timezone = timezone
+            row.windows_json = json.dumps(
+                {
+                    "windows": [window.model_dump(mode="json") for window in windows],
+                    "date_overrides": [
+                        override.model_dump(mode="json")
+                        for override in date_overrides
+                    ],
+                    "date_range_overrides": [
+                        override.model_dump(mode="json")
+                        for override in date_range_overrides
+                    ],
+                },
+                separators=(",", ":"),
+            )
+            row.updated_at = now
+            session.flush()
+            return self._to_replay_worker_monitor_shift_schedule(row)
+
+    def clear_replay_worker_monitor_shift_schedule(
+        self,
+        workspace_id: str,
+    ) -> ReplayWorkerMonitorShiftScheduleDeleteResponse | None:
+        with self.session_factory.begin() as session:
+            row = session.get(ReplayWorkerMonitorShiftScheduleRow, workspace_id)
+            if row is None:
+                return None
+            session.delete(row)
+            return ReplayWorkerMonitorShiftScheduleDeleteResponse(
+                workspace_id=workspace_id,
+                cleared=True,
+            )
+
+    def upsert_replay_worker_alert_policy(
+        self,
+        *,
+        workspace_id: str,
+        warning_consecutive_failures: int,
+        critical_consecutive_failures: int,
+    ) -> ReplayWorkerAlertPolicySummary:
+        now = self._utcnow_naive()
+        with self.session_factory.begin() as session:
+            row = session.get(ReplayWorkerAlertPolicyRow, workspace_id)
+            if row is None:
+                row = ReplayWorkerAlertPolicyRow(workspace_id=workspace_id)
+                session.add(row)
+            row.warning_consecutive_failures = warning_consecutive_failures
+            row.critical_consecutive_failures = critical_consecutive_failures
+            row.updated_at = now
+            session.flush()
+            return self._to_replay_worker_alert_policy(row)
+
+    def delete_replay_worker_alert_policy(self, workspace_id: str) -> None:
+        with self.session_factory.begin() as session:
+            row = session.get(ReplayWorkerAlertPolicyRow, workspace_id)
+            if row is not None:
+                session.delete(row)
+
+    def get_replay_worker_status(self, workspace_id: str | None = None) -> ReplayWorkerStatusSummary | None:
+        with self.session_factory() as session:
+            if workspace_id is not None:
+                row = session.get(ReplayWorkerStatusRow, workspace_id)
+            else:
+                row = session.scalars(
+                    select(ReplayWorkerStatusRow).order_by(ReplayWorkerStatusRow.updated_at.desc())
+                ).first()
+            if row is None:
+                return None
+            return self._to_replay_worker_status(row)
+
+    def list_replay_worker_history(
+        self,
+        workspace_id: str | None = None,
+        *,
+        limit: int = 5,
+    ) -> list[ReplayWorkerHeartbeatSummary]:
+        with self.session_factory() as session:
+            stmt = select(ReplayWorkerHeartbeatRow).order_by(ReplayWorkerHeartbeatRow.emitted_at.desc())
+            if workspace_id is not None:
+                stmt = stmt.where(ReplayWorkerHeartbeatRow.workspace_id == workspace_id)
+            if limit > 0:
+                stmt = stmt.limit(limit)
+            rows = session.scalars(stmt).all()
+            return [self._to_replay_worker_heartbeat(row) for row in rows]
+
     @staticmethod
     def _build_incident_execution_seed(session: Session, incident_row: IncidentRow) -> dict[str, object]:
         signal_rows = session.scalars(
@@ -2979,6 +4072,7 @@ class SqlAlchemyOpsGraphRepository:
             "current_incident_candidates": [],
             "context_bundle_id": "context-1",
             "current_fact_set_version": incident_row.current_fact_set_version,
+            "service_id": incident_row.service_name,
             "confirmed_fact_refs": [
                 {"kind": "incident_fact", "id": row.fact_id} for row in fact_rows
             ],

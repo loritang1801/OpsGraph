@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-opsgraph-schema-version": "2026-03-27.1",
+  "additionalProperties": false,
+  "properties": {
+    "service_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Service Id"
+    },
+    "search_query": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Search Query"
+    },
+    "limit": {
+      "default": 5,
+      "title": "Limit",
+      "type": "integer"
+    }
+  },
+  "title": "CanonicalServiceRegistryLookupRequest",
+  "type": "object"
+}

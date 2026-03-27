@@ -1,0 +1,16 @@
+{
+  "deployments": [
+    {
+      "deployment_id": "deploy-remote-1",
+      "commit_ref": "9f8e7d6c5b4a",
+      "actor": "release-bot",
+      "deployed_at": "2026-03-27T01:02:03Z"
+    },
+    {
+      "deployment_id": "deploy-remote-2",
+      "commit_ref": "8e7d6c5b4a3f",
+      "actor": "deploy-engine",
+      "deployed_at": "2026-03-27T00:57:03Z"
+    }
+  ]
+}

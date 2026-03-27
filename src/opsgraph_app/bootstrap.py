@@ -1,20 +1,52 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 from .auth import SqlAlchemyOpsGraphAuthService
+from .product_gateway import OpsGraphProductModelGateway
 from .replay_fixtures import replay_fixture_root
 from .repository import SqlAlchemyOpsGraphRepository
 from .shared_runtime import load_shared_agent_platform
 from .service import OpsGraphAppService
+from .tool_adapters import register_opsgraph_product_tool_adapters
+from .worker import OpsGraphReplayWorker, OpsGraphReplayWorkerSupervisor
 
 SUPPORTED_WORKFLOW_NAMES = (
     "opsgraph_incident_response",
     "opsgraph_retrospective",
 )
+
+
+def _resolve_int_setting(*, explicit: int | None, env_var: str, default: int) -> int:
+    if explicit is not None:
+        return explicit
+    raw = os.getenv(env_var)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
+
+
+def _resolve_replay_worker_alert_thresholds(
+    *,
+    warning_consecutive_failures: int | None = None,
+    critical_consecutive_failures: int | None = None,
+) -> tuple[int, int]:
+    return (
+        _resolve_int_setting(
+            explicit=warning_consecutive_failures,
+            env_var="OPSGRAPH_REPLAY_ALERT_WARNING_CONSECUTIVE_FAILURES",
+            default=1,
+        ),
+        _resolve_int_setting(
+            explicit=critical_consecutive_failures,
+            env_var="OPSGRAPH_REPLAY_ALERT_CRITICAL_CONSECUTIVE_FAILURES",
+            default=3,
+        ),
+    )
 
 
 def _build_registry():
@@ -42,18 +74,22 @@ def _create_runtime_engine(database_url: str | None = None):
     return create_engine(resolved_database_url)
 
 
-def build_runtime_components(*, database_url: str | None = None) -> dict[str, Any]:
+def build_runtime_components(
+    *,
+    database_url: str | None = None,
+    replay_worker_alert_warning_consecutive_failures: int | None = None,
+    replay_worker_alert_critical_consecutive_failures: int | None = None,
+) -> dict[str, Any]:
     ap, registry = _build_registry()
-    runtime_engine = _create_runtime_engine(database_url)
-    runtime_stores = ap.create_sqlalchemy_runtime_stores(engine=runtime_engine)
     catalog = ap.build_default_runtime_catalog()
     prompt_service = ap.PromptAssemblyService(catalog)
-    model_gateway = ap.StaticModelGateway()
     tool_executor = ap.ToolExecutor(catalog)
-    ap.register_auditflow_demo_gateway_responses(model_gateway)
-    ap.register_opsgraph_demo_gateway_responses(model_gateway)
-    ap.register_auditflow_demo_tool_adapters(tool_executor)
-    ap.register_opsgraph_demo_tool_adapters(tool_executor)
+    runtime_engine = _create_runtime_engine(database_url)
+    runtime_stores = ap.create_sqlalchemy_runtime_stores(engine=runtime_engine)
+    repository = SqlAlchemyOpsGraphRepository.from_runtime_stores(runtime_stores)
+    auth_service = SqlAlchemyOpsGraphAuthService.from_runtime_stores(runtime_stores)
+    register_opsgraph_product_tool_adapters(tool_executor, repository)
+    model_gateway = OpsGraphProductModelGateway()
     execution_service = ap.WorkflowExecutionService(
         prompt_service,
         model_gateway=model_gateway,
@@ -72,8 +108,8 @@ def build_runtime_components(*, database_url: str | None = None) -> dict[str, An
         "runtime_stores": runtime_stores,
         "execution_service": execution_service,
         "shared_platform": ap,
-        "repository": SqlAlchemyOpsGraphRepository.from_runtime_stores(runtime_stores),
-        "auth_service": SqlAlchemyOpsGraphAuthService.from_runtime_stores(runtime_stores),
+        "repository": repository,
+        "auth_service": auth_service,
         "replay_fixture_store": ap.FileReplayFixtureStore(replay_fixture_root()),
     }
     components["api_service"] = ap.WorkflowApiService(
@@ -81,21 +117,59 @@ def build_runtime_components(*, database_url: str | None = None) -> dict[str, An
         execution_service,
         runtime_stores=runtime_stores,
     )
+    (
+        warning_consecutive_failures,
+        critical_consecutive_failures,
+    ) = _resolve_replay_worker_alert_thresholds(
+        warning_consecutive_failures=replay_worker_alert_warning_consecutive_failures,
+        critical_consecutive_failures=replay_worker_alert_critical_consecutive_failures,
+    )
+    components["replay_worker_alert_thresholds"] = {
+        "warning_consecutive_failures": warning_consecutive_failures,
+        "critical_consecutive_failures": critical_consecutive_failures,
+    }
     return components
 
 
-def build_execution_service(*, database_url: str | None = None):
-    components = build_runtime_components(database_url=database_url)
+def build_execution_service(
+    *,
+    database_url: str | None = None,
+    replay_worker_alert_warning_consecutive_failures: int | None = None,
+    replay_worker_alert_critical_consecutive_failures: int | None = None,
+):
+    components = build_runtime_components(
+        database_url=database_url,
+        replay_worker_alert_warning_consecutive_failures=replay_worker_alert_warning_consecutive_failures,
+        replay_worker_alert_critical_consecutive_failures=replay_worker_alert_critical_consecutive_failures,
+    )
     return components["execution_service"]
 
 
-def build_api_service(*, database_url: str | None = None):
-    components = build_runtime_components(database_url=database_url)
+def build_api_service(
+    *,
+    database_url: str | None = None,
+    replay_worker_alert_warning_consecutive_failures: int | None = None,
+    replay_worker_alert_critical_consecutive_failures: int | None = None,
+):
+    components = build_runtime_components(
+        database_url=database_url,
+        replay_worker_alert_warning_consecutive_failures=replay_worker_alert_warning_consecutive_failures,
+        replay_worker_alert_critical_consecutive_failures=replay_worker_alert_critical_consecutive_failures,
+    )
     return components["api_service"]
 
 
-def build_app_service(*, database_url: str | None = None) -> OpsGraphAppService:
-    components = build_runtime_components(database_url=database_url)
+def build_app_service(
+    *,
+    database_url: str | None = None,
+    replay_worker_alert_warning_consecutive_failures: int | None = None,
+    replay_worker_alert_critical_consecutive_failures: int | None = None,
+) -> OpsGraphAppService:
+    components = build_runtime_components(
+        database_url=database_url,
+        replay_worker_alert_warning_consecutive_failures=replay_worker_alert_warning_consecutive_failures,
+        replay_worker_alert_critical_consecutive_failures=replay_worker_alert_critical_consecutive_failures,
+    )
     return OpsGraphAppService(
         components["api_service"],
         repository=components["repository"],
@@ -105,15 +179,46 @@ def build_app_service(*, database_url: str | None = None) -> OpsGraphAppService:
         workflow_registry=components["workflow_registry"],
         prompt_service=components["prompt_service"],
         replay_fixture_store=components["replay_fixture_store"],
+        replay_worker_alert_warning_consecutive_failures=components["replay_worker_alert_thresholds"][
+            "warning_consecutive_failures"
+        ],
+        replay_worker_alert_critical_consecutive_failures=components["replay_worker_alert_thresholds"][
+            "critical_consecutive_failures"
+        ],
     )
 
 
 def build_fastapi_app(*, database_url: str | None = None):
     from .routes import create_fastapi_app
 
-    service = build_app_service(database_url=database_url)
-    try:
-        return create_fastapi_app(service)
-    except Exception:
-        service.close()
-        raise
+    ap = load_shared_agent_platform()
+    return ap.build_managed_fastapi_app(
+        service_factory=lambda: build_app_service(database_url=database_url),
+        app_factory=create_fastapi_app,
+    )
+
+
+def build_replay_worker(
+    *,
+    database_url: str | None = None,
+    workspace_id: str = "ops-ws-1",
+    limit: int = 20,
+) -> OpsGraphReplayWorker:
+    return OpsGraphReplayWorker(
+        build_app_service(database_url=database_url),
+        workspace_id=workspace_id,
+        limit=limit,
+    )
+
+
+def build_replay_worker_supervisor(
+    *,
+    database_url: str | None = None,
+    workspace_id: str = "ops-ws-1",
+    limit: int = 20,
+) -> OpsGraphReplayWorkerSupervisor:
+    return build_replay_worker(
+        database_url=database_url,
+        workspace_id=workspace_id,
+        limit=limit,
+    ).build_supervisor()

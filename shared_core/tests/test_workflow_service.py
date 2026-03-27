@@ -14,6 +14,7 @@ from agent_platform import (
     WorkflowExecutionService,
     WorkflowStep,
     build_default_runtime_catalog,
+    build_workflow_registry,
 )
 from agent_platform.shared import SharedAgentOutputEnvelope
 
@@ -108,6 +109,7 @@ class WorkflowExecutionServiceTests(unittest.TestCase):
                 workflow_state={"audit_cycle_id": "cycle-1", "evidence_item_id": "evidence-1"},
                 retrieval={"evidence_chunk_refs": [{"kind": "evidence_chunk", "id": "chunk-1"}]},
                 database={"in_scope_controls": ["control-1"], "framework_name": "SOC2"},
+                memory={"accepted_pattern_memories": []},
             ),
         }
 
@@ -140,6 +142,144 @@ class WorkflowExecutionServiceTests(unittest.TestCase):
             seen,
             ["auditflow.evidence.normalized", "auditflow.mapping.generated"],
         )
+
+    def test_service_builds_dynamic_opsgraph_state_from_structured_outputs(self) -> None:
+        gateway = StaticModelGateway()
+        gateway.register_response(
+            bundle_id="opsgraph.triage",
+            bundle_version="2026-03-16.1",
+            response=SharedAgentOutputEnvelope(
+                status="success",
+                summary="Triaged the incident.",
+                structured_output={
+                    "dedupe_group_key": "payments-api:latency-spike",
+                    "severity": "sev1",
+                    "severity_confidence": 0.91,
+                    "title": "Elevated latency on payments-api",
+                    "service_id": "payments-api",
+                    "blast_radius_summary": "Payments traffic is degraded.",
+                },
+            ),
+        )
+        gateway.register_response(
+            bundle_id="opsgraph.investigator",
+            bundle_version="2026-03-16.1",
+            response=SharedAgentOutputEnvelope(
+                status="success",
+                summary="Generated incident hypotheses.",
+                structured_output={
+                    "hypotheses": [
+                        {
+                            "title": "Recent dependency change increased request latency.",
+                            "confidence": 0.82,
+                            "rank": 1,
+                            "evidence_refs": [{"kind": "incident_fact", "id": "fact-1"}],
+                            "verification_steps": [
+                                {"step_order": 1, "instruction_text": "Check the dependency metrics."}
+                            ],
+                        }
+                    ]
+                },
+                citations=[{"kind": "incident_fact", "id": "fact-1"}],
+            ),
+        )
+        gateway.register_response(
+            bundle_id="opsgraph.runbook_advisor",
+            bundle_version="2026-03-16.1",
+            response=SharedAgentOutputEnvelope(
+                status="success",
+                summary="Recommended mitigation steps.",
+                structured_output={
+                    "recommendations": [
+                        {
+                            "recommendation_type": "mitigate",
+                            "risk_level": "high_risk",
+                            "requires_approval": True,
+                            "title": "Rollback the latest payments-api change",
+                            "instructions_markdown": "Rollback the latest release and confirm latency recovers.",
+                            "evidence_refs": [{"kind": "hypothesis", "id": "hypothesis-1"}],
+                        }
+                    ]
+                },
+                citations=[{"kind": "hypothesis", "id": "hypothesis-1"}],
+            ),
+        )
+        gateway.register_response(
+            bundle_id="opsgraph.comms",
+            bundle_version="2026-03-16.1",
+            response=SharedAgentOutputEnvelope(
+                status="success",
+                summary="Generated incident communication drafts.",
+                structured_output={
+                    "drafts": [
+                        {
+                            "channel_type": "internal_slack",
+                            "fact_set_version": 2,
+                            "body_markdown": "Investigating elevated latency on payments-api.",
+                            "fact_refs": [{"kind": "incident_fact", "id": "fact-1"}],
+                        }
+                    ]
+                },
+                citations=[{"kind": "incident_fact", "id": "fact-1"}],
+            ),
+        )
+
+        registry = build_workflow_registry()
+        definition = registry.get("opsgraph_incident_response")
+        state_store = InMemoryWorkflowStateStore()
+        service = WorkflowExecutionService(
+            self.prompt_service,
+            model_gateway=gateway,
+            state_store=state_store,
+            checkpoint_store=InMemoryCheckpointStore(),
+            replay_store=InMemoryReplayStore(),
+            outbox_store=InMemoryOutboxStore(),
+        )
+
+        initial_state = definition.initial_state_builder(
+            "wf-opsgraph-1",
+            {
+                "incident_id": "incident-1",
+                "ops_workspace_id": "ops-ws-1",
+                "signal_ids": ["signal-1"],
+                "signal_summaries": [
+                    {
+                        "signal_id": "signal-1",
+                        "source": "grafana",
+                        "correlation_key": "payments-api:latency-spike",
+                        "summary": "Latency spike on payments-api.",
+                        "observed_at": "2026-03-16T09:00:00Z",
+                    }
+                ],
+                "current_incident_candidates": [],
+                "context_bundle_id": "context-1",
+                "current_fact_set_version": 2,
+                "service_id": "payments-api",
+                "confirmed_fact_refs": [{"kind": "incident_fact", "id": "fact-1"}],
+                "top_hypothesis_refs": [{"kind": "deployment", "id": "deploy-123"}],
+                "target_channels": ["internal_slack"],
+                "organization_id": "org-1",
+                "workspace_id": "ws-1",
+            },
+            None,
+        )
+        result = service.run_workflow(
+            workflow_run_id="wf-opsgraph-1",
+            workflow_type=definition.workflow_type,
+            initial_state=initial_state,
+            steps=definition.steps,
+            source_builders=definition.source_builders,
+        )
+
+        self.assertEqual(result.final_state["current_state"], "resolve")
+        self.assertEqual(result.final_state["service_id"], "payments-api")
+        self.assertEqual(result.final_state["severity"], "sev1")
+        self.assertEqual(len(result.final_state["top_hypothesis_ids"]), 1)
+        self.assertEqual(len(result.final_state["recommendation_ids"]), 1)
+        self.assertEqual(len(result.final_state["publish_ready_draft_ids"]), 1)
+        persisted = service.load_workflow_state("wf-opsgraph-1")
+        self.assertEqual(persisted["service_id"], "payments-api")
+        self.assertEqual(persisted["title"], "Elevated latency on payments-api")
 
 
 if __name__ == "__main__":

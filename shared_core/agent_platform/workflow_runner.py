@@ -120,6 +120,21 @@ class WorkflowRunner:
             workflow_type=workflow_type,
             organization_id=str(state.get("organization_id", "unknown-org")),
             workspace_id=str(state.get("workspace_id", "unknown-workspace")),
+            user_id=(
+                str(state["user_id"])
+                if state.get("user_id") not in {None, ""}
+                else None
+            ),
+            role=(
+                str(state["role"])
+                if state.get("role") not in {None, ""}
+                else None
+            ),
+            session_id=(
+                str(state["session_id"])
+                if state.get("session_id") not in {None, ""}
+                else None
+            ),
             subject_type=str(state.get("subject_type", workflow_type)),
             subject_id=str(state.get("subject_id", workflow_run_id)),
             current_state=str(state.get("current_state", step.node_name)),

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-opsgraph-schema-version": "2026-03-27.1",
+  "$defs": {
+    "ServiceRegistryRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "service_id": {
+          "title": "Service Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "owner_team": {
+          "title": "Owner Team",
+          "type": "string"
+        },
+        "dependency_names": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dependency Names",
+          "type": "array"
+        },
+        "runbook_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Runbook Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "service_id",
+        "name",
+        "owner_team"
+      ],
+      "title": "ServiceRegistryRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "services": {
+      "items": {
+        "$ref": "#/$defs/ServiceRegistryRecord"
+      },
+      "title": "Services",
+      "type": "array"
+    }
+  },
+  "title": "ServiceRegistryLookupResult",
+  "type": "object"
+}

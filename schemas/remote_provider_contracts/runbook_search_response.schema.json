@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-opsgraph-schema-version": "2026-03-27.1",
+  "$defs": {
+    "RunbookRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "runbook_id": {
+          "title": "Runbook Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "excerpt": {
+          "title": "Excerpt",
+          "type": "string"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "runbook_id",
+        "title",
+        "excerpt",
+        "score"
+      ],
+      "title": "RunbookRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "runbooks": {
+      "items": {
+        "$ref": "#/$defs/RunbookRecord"
+      },
+      "title": "Runbooks",
+      "type": "array"
+    }
+  },
+  "title": "RunbookSearchResult",
+  "type": "object"
+}

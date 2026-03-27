@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-opsgraph-schema-version": "2026-03-27.1",
+  "additionalProperties": false,
+  "properties": {
+    "service_id": {
+      "title": "Service Id",
+      "type": "string"
+    },
+    "query": {
+      "title": "Query",
+      "type": "string"
+    },
+    "limit": {
+      "default": 5,
+      "title": "Limit",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "service_id",
+    "query"
+  ],
+  "title": "CanonicalRunbookSearchRequest",
+  "type": "object"
+}

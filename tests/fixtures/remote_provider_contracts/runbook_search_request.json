@@ -1,0 +1,7 @@
+{
+  "service_id": "checkout-api",
+  "query": "rollback 5xx errors",
+  "limit": 2,
+  "url_template": "https://runbooks.example.test/search?service={service_id}&q={query}&limit={limit}",
+  "expected_url": "https://runbooks.example.test/search?service=checkout-api&q=rollback%205xx%20errors&limit=2"
+}

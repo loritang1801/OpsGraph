@@ -32,3 +32,13 @@ class LangGraphUnavailableError(ImportError):
 
 class FastAPIUnavailableError(ImportError):
     """Raised when optional FastAPI integration is requested but the package is unavailable."""
+
+
+class SharedAuthorizationError(Exception):
+    """Raised when authorization or authentication checks fail."""
+
+    def __init__(self, *, code: str, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status_code = status_code

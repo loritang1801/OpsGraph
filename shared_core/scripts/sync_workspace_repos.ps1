@@ -17,6 +17,7 @@ if (-not (Test-Path $vendorScript)) {
 }
 
 $workspaceRoot = $null
+$pythonCommand = Get-Command python -ErrorAction SilentlyContinue
 foreach ($candidate in $workspaceCandidates) {
     $hasAllRepos = $true
     foreach ($repoName in $RepoNames) {
@@ -72,6 +73,12 @@ try {
             -SourceRoot $tempSourceRoot `
             -TargetRepoPath $targetRepoPath `
             -DestinationName $DestinationName
+
+        $renderWorkflowScript = Join-Path $targetRepoPath "scripts\render_ci_workflow.py"
+        if ((Test-Path $renderWorkflowScript) -and $null -ne $pythonCommand) {
+            Write-Output "Rendering CI workflow in $targetRepoPath"
+            & $pythonCommand.Source $renderWorkflowScript
+        }
 
         $results += [pscustomobject]@{
             RepoName = $repoName

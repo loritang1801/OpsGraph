@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-opsgraph-schema-version": "2026-03-27.1",
+  "$defs": {
+    "DeploymentRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment_id": {
+          "title": "Deployment Id",
+          "type": "string"
+        },
+        "commit_ref": {
+          "title": "Commit Ref",
+          "type": "string"
+        },
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "deployed_at": {
+          "format": "date-time",
+          "title": "Deployed At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "deployment_id",
+        "commit_ref",
+        "actor",
+        "deployed_at"
+      ],
+      "title": "DeploymentRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "deployments": {
+      "items": {
+        "$ref": "#/$defs/DeploymentRecord"
+      },
+      "title": "Deployments",
+      "type": "array"
+    }
+  },
+  "title": "DeploymentLookupResult",
+  "type": "object"
+}

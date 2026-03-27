@@ -310,6 +310,7 @@ Auth: `viewer`
 Query params:
 
 - `workspace_id` required
+- `shift_label` optional; when provided, `is_default` and `default_source` are resolved against that shift layer first and then fall back to the workspace default
 - `status`
 - `severity`
 - `service_id`
@@ -878,7 +879,479 @@ Notes:
 
 1. Successful replay submissions are persisted to incident audit logs as `replay.start_run`
 
-### 5.15 `GET /api/v1/opsgraph/replays`
+### 5.15 `POST /api/v1/opsgraph/replays/process-queued`
+
+Purpose: process queued replay runs for one workspace in created-at order.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id`
+- `limit` optional, defaults to `20`
+
+Response:
+
+- `200 OK`
+
+```json
+{
+  "data": {
+    "workspace_id": "ops-ws-1",
+    "queued_count": 3,
+    "processed_count": 2,
+    "completed_count": 2,
+    "failed_count": 0,
+    "skipped_count": 0,
+    "remaining_queued_count": 1,
+    "items": [
+      {
+        "id": "uuid",
+        "status": "completed",
+        "workflow_run_id": "uuid-replay"
+      }
+    ]
+  }
+}
+```
+
+Rules:
+
+1. `limit` must be greater than or equal to `1`
+2. Runs are selected from the queued set oldest-first by `created_at`
+3. Each processed item records the same `replay.execute` audit trail as manual replay execution
+
+Operational note:
+
+1. `scripts/run_replay_worker.py` can call this route-equivalent service path once or in polling mode for local and CI replay queue processing
+2. Supervisor-mode replay workers persist their latest heartbeat into the product repository so `/health` and runtime capabilities can report the last observed worker state
+3. Runtime capabilities also expose a recent heartbeat window so product admins can inspect the latest `active` / `idle` / `retrying` transitions without reading worker logs
+4. Replay-worker alerts default to `warning` at 1 consecutive failure and `critical` at 3 consecutive failures; override them with `OPSGRAPH_REPLAY_ALERT_WARNING_CONSECUTIVE_FAILURES` and `OPSGRAPH_REPLAY_ALERT_CRITICAL_CONSECUTIVE_FAILURES`
+5. Replay-worker alert policy edits are recorded in the replay-admin audit log for the selected workspace
+
+### 5.15.1 `GET /api/v1/opsgraph/replays/worker-alert-policy`
+
+Purpose: read the effective replay-worker alert policy for one workspace.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+
+Response:
+
+- `200 OK`
+
+```json
+{
+  "data": {
+    "workspace_id": "ops-ws-1",
+    "warning_consecutive_failures": 1,
+    "critical_consecutive_failures": 3,
+    "source": "default",
+    "updated_at": null
+  }
+}
+```
+
+### 5.15.2 `PATCH /api/v1/opsgraph/replays/worker-alert-policy`
+
+Purpose: set or reset the replay-worker alert policy for one workspace.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+
+Request body:
+
+```json
+{
+  "warning_consecutive_failures": 2,
+  "critical_consecutive_failures": 4
+}
+```
+
+Rules:
+
+1. `warning_consecutive_failures` must be greater than or equal to `1`
+2. `critical_consecutive_failures` must be greater than or equal to `warning_consecutive_failures`
+3. Sending the runtime default threshold pair removes the workspace override and returns `source = "default"`
+
+### 5.15.3 `GET /api/v1/opsgraph/replays/worker-monitor-presets`
+
+Purpose: list shared replay-worker monitor presets for one workspace.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+
+Response:
+
+- `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "workspace_id": "ops-ws-1",
+      "preset_name": "night-shift",
+      "history_limit": 10,
+      "actor_user_id": "user-admin-1",
+      "request_id": "req-replay-policy-1",
+      "policy_audit_limit": 5,
+      "policy_audit_copy_format": "markdown",
+      "policy_audit_include_summary": true,
+      "is_default": true,
+      "default_source": "shift_default"
+    }
+  ]
+}
+```
+
+### 5.15.3a `GET /api/v1/opsgraph/replays/worker-monitor-shift-schedule`
+
+Purpose: read the workspace shift table used by replay-worker monitor auto shift resolution.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+
+Response:
+
+- `200 OK`
+
+```json
+{
+  "data": {
+    "workspace_id": "ops-ws-1",
+    "timezone": "UTC",
+    "windows": [
+      {"shift_label": "day", "start_time": "08:00", "end_time": "20:00"},
+      {"shift_label": "night", "start_time": "20:00", "end_time": "08:00"}
+    ],
+    "date_overrides": [
+      {
+        "date": "2026-12-25",
+        "note": "Holiday coverage",
+        "windows": [
+          {"shift_label": "holiday", "start_time": "10:00", "end_time": "14:00"}
+        ]
+      }
+    ],
+    "date_range_overrides": [
+      {
+        "start_date": "2026-12-26",
+        "end_date": "2026-12-31",
+        "note": "Change freeze week",
+        "windows": [
+          {"shift_label": "freeze", "start_time": "09:00", "end_time": "18:00"}
+        ]
+      }
+    ],
+    "updated_at": "2026-03-27T09:00:01Z"
+  }
+}
+```
+
+### 5.15.3b `PUT /api/v1/opsgraph/replays/worker-monitor-shift-schedule`
+
+Purpose: create or replace the workspace shift table used by replay-worker monitor auto shift resolution.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+
+Rules:
+
+1. `timezone` must be a valid IANA timezone such as `UTC` or `Asia/Shanghai`
+2. `windows[].shift_label` must not be blank and must be unique within one schedule
+3. `windows[].start_time` and `windows[].end_time` must use `HH:MM` 24-hour format
+4. Overnight windows are allowed, for example `20:00 -> 08:00`
+5. `date_overrides[].date` must use `YYYY-MM-DD` format and must be unique within one schedule
+6. `date_range_overrides[].start_date` and `date_range_overrides[].end_date` must use `YYYY-MM-DD` format and ranges must not overlap each other
+7. `date_overrides[].windows` and `date_range_overrides[].windows` use the same window contract as the base schedule
+8. Resolution order is exact date override first, then date-range override, then the base schedule
+9. When any override layer matches one local date it fully replaces the lower-priority schedule for that date, including the case where no override window matches the current hour
+10. Successful writes are persisted to replay-admin audit logs as `replay.update_worker_monitor_shift_schedule`
+
+### 5.15.3c `DELETE /api/v1/opsgraph/replays/worker-monitor-shift-schedule`
+
+Purpose: clear the workspace shift table used by replay-worker monitor auto shift resolution.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+
+Rules:
+
+1. Successful clears are persisted to replay-admin audit logs as `replay.clear_worker_monitor_shift_schedule`
+
+### 5.15.3d `GET /api/v1/opsgraph/replays/worker-monitor-resolved-shift`
+
+Purpose: resolve the currently active shift label from the workspace shift table.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+- `at` optional ISO-8601 timestamp; defaults to server current time
+
+Response:
+
+- `200 OK`
+
+```json
+{
+  "data": {
+    "workspace_id": "ops-ws-1",
+    "timezone": "UTC",
+    "evaluated_at": "2026-03-27T21:00:00Z",
+    "shift_label": "freeze",
+    "source": "date_range_override",
+    "matched_window": {
+      "shift_label": "freeze",
+      "start_time": "09:00",
+      "end_time": "18:00"
+    },
+    "override_date": null,
+    "override_range_start_date": "2026-12-26",
+    "override_range_end_date": "2026-12-31",
+    "override_note": "Change freeze week",
+    "updated_at": "2026-03-27T09:00:01Z"
+  }
+}
+```
+
+### 5.15.4 `PUT /api/v1/opsgraph/replays/worker-monitor-presets/{preset_name}`
+
+Purpose: create or update one shared replay-worker monitor preset for a workspace.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+
+Request body:
+
+```json
+{
+  "history_limit": 10,
+  "actor_user_id": "user-admin-1",
+  "request_id": "req-replay-policy-1",
+  "policy_audit_limit": 5,
+  "policy_audit_copy_format": "markdown",
+  "policy_audit_include_summary": true
+}
+```
+
+Rules:
+
+1. `preset_name` must not be blank
+2. `history_limit` must be greater than or equal to `1`
+3. `policy_audit_limit` must be greater than or equal to `1`
+4. `policy_audit_copy_format` must be one of `plain`, `markdown`, or `slack`
+5. Successful writes are persisted to replay-admin audit logs as `replay.upsert_worker_monitor_preset`
+
+### 5.15.5 `DELETE /api/v1/opsgraph/replays/worker-monitor-presets/{preset_name}`
+
+Purpose: delete one shared replay-worker monitor preset for a workspace.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+
+Response:
+
+- `200 OK`
+
+Rules:
+
+1. Successful deletes are persisted to replay-admin audit logs as `replay.delete_worker_monitor_preset`
+
+### 5.15.6 `GET /api/v1/opsgraph/replays/worker-monitor-default-preset`
+
+Purpose: read the effective replay-worker monitor default preset for one workspace, optionally scoped to one shift label.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+- `shift_label` optional
+
+Response:
+
+- `200 OK`
+
+```json
+{
+  "data": {
+    "workspace_id": "ops-ws-1",
+    "preset_name": "night-shift",
+    "shift_label": "night",
+    "source": "shift_default",
+    "updated_at": "2026-03-27T09:00:04Z",
+    "cleared": false
+  }
+}
+```
+
+### 5.15.7 `PUT /api/v1/opsgraph/replays/worker-monitor-default-preset/{preset_name}`
+
+Purpose: mark one shared replay-worker monitor preset as the default preset for either the workspace or one shift layer.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+- `shift_label` optional
+
+Rules:
+
+1. `preset_name` must already exist as a shared workspace preset
+2. When `shift_label` is present the write only affects that shift layer
+3. Successful writes are persisted to replay-admin audit logs as `replay.set_worker_monitor_default_preset`
+
+### 5.15.8 `DELETE /api/v1/opsgraph/replays/worker-monitor-default-preset`
+
+Purpose: clear the targeted replay-worker monitor default layer for one workspace.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+- `shift_label` optional
+
+Rules:
+
+1. When `shift_label` is present only that shift override is cleared; the workspace default remains intact
+2. Successful clears are persisted to replay-admin audit logs as `replay.clear_worker_monitor_default_preset`
+
+### 5.15.9 `GET /api/v1/opsgraph/replays/audit-logs`
+
+Purpose: list replay-admin audit records for one workspace.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` required
+- `action_type` optional
+- `actor_user_id` optional
+- `request_id` optional
+- `cursor` optional
+- `limit` optional, default `20`
+
+Response:
+
+- `200 OK`
+
+```json
+{
+  "data": [
+    {
+      "id": "replay-audit-1",
+      "workspace_id": "ops-ws-1",
+      "action_type": "replay.update_worker_alert_policy",
+      "subject_type": "replay_worker_alert_policy",
+      "subject_id": "ops-ws-1"
+    }
+  ]
+}
+```
+
+### 5.15.10 `GET /api/v1/opsgraph/replays/worker-status`
+
+Purpose: read the latest persisted replay worker status plus a recent heartbeat window.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` optional
+- `history_limit` optional, defaults to `10`
+
+Response:
+
+- `200 OK`
+
+```json
+{
+  "data": {
+    "workspace_id": "ops-ws-1",
+    "current": {
+      "status": "idle",
+      "remaining_queued_count": 0
+    },
+    "policy": {
+      "workspace_id": "ops-ws-1",
+      "warning_consecutive_failures": 1,
+      "critical_consecutive_failures": 3,
+      "source": "default"
+    },
+    "history": [
+      {
+        "status": "idle",
+        "iteration": 2
+      },
+      {
+        "status": "active",
+        "iteration": 1
+      }
+    ]
+  }
+}
+```
+
+Rules:
+
+1. `history_limit` must be greater than or equal to `1`
+2. `history` is ordered newest-first
+
+### 5.15.11 `GET /api/v1/opsgraph/replays/worker-status/stream`
+
+Purpose: subscribe to replay worker status snapshots via SSE.
+
+Auth: `product_admin` or stronger
+
+Query params:
+
+- `workspace_id` optional
+- `history_limit` optional, defaults to `10`
+
+Response:
+
+- `200 OK`
+- `Content-Type: text/event-stream`
+
+Event contract:
+
+1. Event name is `opsgraph.replay_worker.status`
+2. Event payload matches `GET /api/v1/opsgraph/replays/worker-status`
+3. Event ids are derived from the latest persisted heartbeat timestamp for the selected workspace
+
+Monitoring page:
+
+1. `GET /opsgraph/replays/worker-monitor` serves a product-admin HTML monitor that uses the same-origin SSE stream, highlights the current replay worker alert, shows the latest persisted failure details, displays recent policy-change audit entries with actor/request quick filters, supports preset scope switching between workspace-shared presets and browser-local presets, named preset save/load/delete for workspace, filter, and export settings, supports marking or clearing either the workspace default preset or one shift-specific default layer via `Shift Label`, adds `Shift Source` manual/auto selection, resolves the current shift from the workspace shift table when auto mode is active, surfaces exact-date and date-range override matches in the shift status line, automatically applies the effective default preset on first load in workspace scope when no explicit filter override is present, exposes an inline `Shift Schedule` editor backed by `GET/PUT/DELETE /api/v1/opsgraph/replays/worker-monitor-shift-schedule` for timezone, base windows, exact-date overrides, and range overrides, adds structured quick-add/remove controls for base windows plus date/range override windows, supports in-draft up/down reordering and row-to-form edit actions for those windows, adds direct copy/export/import actions for standalone shift schedule JSON, shows an import preview before imported JSON replaces the current draft, includes a detailed per-window diff for added/removed/reordered base/date/range entries, keeps advanced JSON arrays available for bulk edits, exposes copy-request/copy-filter-link/copy-latest-context/row-context actions with `Plain`/`Markdown`/`Slack` formatting, whole-window/latest-row/per-row JSON/CSV export with optional monitor summary metadata including the active copy format, preset scope, shift source, shift label, resolved shift label, resolved override date/range/note, preset name, and default source, alert/status-aware filenames, and embedded monitor return links, inline request/result payload expansion, fresh-row highlighting for newly recorded policy edits, adjustable row window, and older/newest paging controls, and lets product admins edit or reset the workspace alert thresholds in place
+
+### 5.16 `GET /api/v1/opsgraph/replays`
 
 Purpose: list replay runs for one workspace or one incident.
 
@@ -897,7 +1370,7 @@ Response:
 
 - `200 OK`
 
-### 5.16 `GET /api/v1/opsgraph/replays/reports`
+### 5.17 `GET /api/v1/opsgraph/replays/reports`
 
 Purpose: list replay evaluation reports for one workspace with optional incident, replay run, or replay case filters.
 
@@ -916,7 +1389,7 @@ Response:
 
 Notes:
 
-1. Replay baseline capture, replay status mutation, replay execute, and replay evaluate flows are also persisted to incident audit logs as `replay.capture_baseline`, `replay.update_status`, `replay.execute`, and `replay.evaluate`
+1. Replay baseline capture, replay status mutation, replay execute, replay queued-batch processing, and replay evaluate flows are also persisted to incident audit logs as `replay.capture_baseline`, `replay.update_status`, `replay.execute`, and `replay.evaluate`
 
 ## 6. SSE Contract
 

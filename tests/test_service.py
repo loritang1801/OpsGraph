@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 import json
+import os
 import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import select
 
@@ -16,7 +18,14 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from opsgraph_app.bootstrap import build_app_service
-from opsgraph_app.repository import ApprovalTaskRow, ArtifactBlobRow, CommsDraftRow, PostmortemRow, ReplayCaseRow
+from opsgraph_app.repository import (
+    ApprovalTaskRow,
+    ArtifactBlobRow,
+    CommsDraftRow,
+    PostmortemRow,
+    ReplayCaseRow,
+    ReplayRunRow,
+)
 from opsgraph_app.sample_payloads import (
     approval_decision_command,
     alert_ingest_command,
@@ -37,6 +46,7 @@ from opsgraph_app.sample_payloads import (
     retrospective_command,
     severity_override_command,
 )
+from opsgraph_app.worker import OpsGraphReplayWorker
 from shared_core.agent_platform.sqlalchemy_stores import ReplayRecordRow, WorkflowStateRow
 
 
@@ -659,6 +669,10 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(len(workspace.recommendations), 1)
         self.assertEqual(len(workspace.approval_tasks), 1)
         self.assertEqual(len(workspace.comms_drafts), 1)
+        self.assertEqual(workspace.incident.service_name, "inventory-api")
+        self.assertEqual(workspace.incident.severity, "sev1")
+        self.assertIn("inventory-api", workspace.recommendations[0].title.lower())
+        self.assertNotEqual(workspace.recommendations[0].title, "Scale checkout workers")
         self.assertEqual(
             workspace.comms_drafts[0].approval_task_id,
             workspace.approval_tasks[0].approval_task_id,
@@ -690,6 +704,829 @@ class OpsGraphServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(published.status, "published")
+
+    def test_get_runtime_capabilities_reports_product_runtime_backends(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        capabilities = service.get_runtime_capabilities()
+        health = service.get_health_status()
+
+        self.assertEqual(capabilities.product, "opsgraph")
+        self.assertEqual(capabilities.model_provider.effective_mode, "local")
+        self.assertEqual(capabilities.model_provider.backend_id, "heuristic-local")
+        self.assertEqual(capabilities.tooling["incident_store"].backend_id, "sqlalchemy-repository")
+        self.assertEqual(capabilities.tooling["deployment_lookup"].backend_id, "heuristic-github-adapter")
+        self.assertEqual(capabilities.tooling["service_registry"].backend_id, "heuristic-service-registry")
+        self.assertEqual(capabilities.tooling["runbook_search"].effective_mode, "local")
+        self.assertIsNone(capabilities.replay_worker)
+        self.assertIsNotNone(capabilities.replay_worker_alert)
+        assert capabilities.replay_worker_alert is not None
+        self.assertEqual(capabilities.replay_worker_alert.level, "warning")
+        self.assertIsNotNone(capabilities.replay_worker_alert_policy)
+        assert capabilities.replay_worker_alert_policy is not None
+        self.assertEqual(capabilities.replay_worker_alert_policy.warning_consecutive_failures, 1)
+        self.assertEqual(capabilities.replay_worker_alert_policy.critical_consecutive_failures, 3)
+        self.assertIsNotNone(health.runtime_summary)
+        self.assertEqual(health.runtime_summary.model_provider_mode, "local")
+        self.assertEqual(health.runtime_summary.tooling_profile, "product-runtime")
+        self.assertEqual(health.runtime_summary.tooling_backends["service_registry"], "heuristic-service-registry")
+        self.assertIsNone(health.runtime_summary.replay_worker_status)
+        self.assertIsNone(health.runtime_summary.replay_worker_alert_level)
+
+    def test_get_runtime_capabilities_reports_configured_remote_tool_backends(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_DEPLOYMENT_LOOKUP_PROVIDER": "auto",
+                "OPSGRAPH_DEPLOYMENT_LOOKUP_URL_TEMPLATE": (
+                    "https://deployments.example.test/services/{service_id}/deployments"
+                ),
+                "OPSGRAPH_DEPLOYMENT_LOOKUP_BACKEND_ID": "github-deployments-api",
+                "OPSGRAPH_SERVICE_REGISTRY_PROVIDER": "auto",
+                "OPSGRAPH_SERVICE_REGISTRY_URL_TEMPLATE": (
+                    "https://services.example.test/registry?service={service_id}&query={search_query}&limit={limit}"
+                ),
+                "OPSGRAPH_SERVICE_REGISTRY_BACKEND_ID": "service-registry-api",
+                "OPSGRAPH_RUNBOOK_SEARCH_PROVIDER": "auto",
+                "OPSGRAPH_RUNBOOK_SEARCH_URL_TEMPLATE": (
+                    "https://runbooks.example.test/search?service={service_id}&q={query}&limit={limit}"
+                ),
+                "OPSGRAPH_RUNBOOK_SEARCH_BACKEND_ID": "runbook-search-api",
+            },
+            clear=False,
+        ):
+            service = build_app_service()
+            self.addCleanup(service.close)
+
+            capabilities = service.get_runtime_capabilities()
+
+            self.assertEqual(capabilities.tooling["deployment_lookup"].effective_mode, "http")
+            self.assertEqual(capabilities.tooling["deployment_lookup"].backend_id, "github-deployments-api")
+            self.assertEqual(capabilities.tooling["service_registry"].effective_mode, "http")
+            self.assertEqual(capabilities.tooling["service_registry"].backend_id, "service-registry-api")
+            self.assertEqual(capabilities.tooling["runbook_search"].effective_mode, "http")
+            self.assertEqual(capabilities.tooling["runbook_search"].backend_id, "runbook-search-api")
+            health = service.get_health_status()
+            self.assertEqual(health.runtime_summary.tooling_modes["service_registry"], "http")
+            self.assertEqual(health.runtime_summary.tooling_backends["service_registry"], "service-registry-api")
+
+    def test_get_runtime_capabilities_reports_configured_replay_worker_alert_policy(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_REPLAY_ALERT_WARNING_CONSECUTIVE_FAILURES": "2",
+                "OPSGRAPH_REPLAY_ALERT_CRITICAL_CONSECUTIVE_FAILURES": "4",
+            },
+            clear=False,
+        ):
+            service = build_app_service()
+            self.addCleanup(service.close)
+
+            capabilities = service.get_runtime_capabilities()
+
+            self.assertIsNotNone(capabilities.replay_worker_alert_policy)
+            assert capabilities.replay_worker_alert_policy is not None
+            self.assertEqual(capabilities.replay_worker_alert_policy.warning_consecutive_failures, 2)
+            self.assertEqual(capabilities.replay_worker_alert_policy.critical_consecutive_failures, 4)
+
+    def test_get_runtime_capabilities_uses_workspace_override_for_latest_worker_policy(self) -> None:
+        service = build_app_service(
+            replay_worker_alert_warning_consecutive_failures=1,
+            replay_worker_alert_critical_consecutive_failures=5,
+        )
+        self.addCleanup(service.close)
+        service.update_replay_worker_alert_policy(
+            "ops-ws-1",
+            {
+                "warning_consecutive_failures": 2,
+                "critical_consecutive_failures": 2,
+            },
+        )
+        service.repository.record_replay_worker_heartbeat(
+            workspace_id="ops-ws-1",
+            status="retrying",
+            iteration=4,
+            attempted_count=0,
+            dispatched_count=0,
+            failed_count=2,
+            skipped_count=0,
+            idle_polls=0,
+            consecutive_failures=2,
+            remaining_queued_count=1,
+            error_message=None,
+            emitted_at=datetime(2026, 3, 27, 9, 30, tzinfo=UTC),
+        )
+
+        capabilities = service.get_runtime_capabilities()
+
+        self.assertIsNotNone(capabilities.replay_worker_alert_policy)
+        assert capabilities.replay_worker_alert_policy is not None
+        self.assertEqual(capabilities.replay_worker_alert_policy.workspace_id, "ops-ws-1")
+        self.assertEqual(capabilities.replay_worker_alert_policy.source, "workspace_override")
+        self.assertEqual(capabilities.replay_worker_alert_policy.critical_consecutive_failures, 2)
+        self.assertIsNotNone(capabilities.replay_worker_alert)
+        assert capabilities.replay_worker_alert is not None
+        self.assertEqual(capabilities.replay_worker_alert.level, "critical")
+
+    def test_get_runtime_capabilities_reports_last_replay_worker_heartbeat(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+        worker = OpsGraphReplayWorker(service)
+
+        service.start_replay_run(
+            replay_run_command(model_bundle_version="opsgraph-worker-health-v1"),
+            idempotency_key="opsgraph-worker-health-1",
+        )
+        worker.build_supervisor().run(
+            poll_interval_seconds=0,
+            max_iterations=2,
+            max_idle_polls=1,
+            heartbeat_every_iterations=1,
+        )
+
+        capabilities = service.get_runtime_capabilities()
+        health = service.get_health_status()
+
+        self.assertIsNotNone(capabilities.replay_worker)
+        assert capabilities.replay_worker is not None
+        self.assertEqual(capabilities.replay_worker.workspace_id, "ops-ws-1")
+        self.assertEqual(capabilities.replay_worker.status, "idle")
+        self.assertEqual(capabilities.replay_worker.remaining_queued_count, 0)
+        self.assertEqual([item.status for item in capabilities.replay_worker_history], ["idle", "active"])
+        self.assertIsNotNone(capabilities.replay_worker_alert)
+        assert capabilities.replay_worker_alert is not None
+        self.assertEqual(capabilities.replay_worker_alert.level, "healthy")
+        self.assertEqual(health.runtime_summary.replay_worker_status, "idle")
+        self.assertEqual(health.runtime_summary.replay_worker_workspace_id, "ops-ws-1")
+        self.assertEqual(health.runtime_summary.replay_worker_remaining_queued_count, 0)
+        self.assertIsNotNone(health.runtime_summary.replay_worker_last_seen_at)
+        self.assertEqual(health.runtime_summary.replay_worker_alert_level, "healthy")
+
+    def test_get_replay_worker_status_returns_current_and_history_window(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+        worker = OpsGraphReplayWorker(service)
+
+        service.start_replay_run(
+            replay_run_command(model_bundle_version="opsgraph-worker-route-v1"),
+            idempotency_key="opsgraph-worker-route-1",
+        )
+        worker.build_supervisor().run(
+            poll_interval_seconds=0,
+            max_iterations=3,
+            max_idle_polls=2,
+            heartbeat_every_iterations=1,
+        )
+
+        status = service.get_replay_worker_status(workspace_id="ops-ws-1", history_limit=2)
+
+        self.assertEqual(status.workspace_id, "ops-ws-1")
+        self.assertIsNotNone(status.current)
+        assert status.current is not None
+        self.assertEqual(status.current.status, "idle")
+        self.assertEqual([item.status for item in status.history], ["idle", "idle"])
+        self.assertIsNotNone(status.alert)
+        assert status.alert is not None
+        self.assertEqual(status.alert.level, "healthy")
+        self.assertIn("healthy", status.alert.headline.lower())
+        self.assertIsNotNone(status.policy)
+        assert status.policy is not None
+        self.assertEqual(status.policy.workspace_id, "ops-ws-1")
+        self.assertEqual(status.policy.source, "default")
+        self.assertEqual(status.policy.default_warning_consecutive_failures, 1)
+        self.assertEqual(status.policy.default_critical_consecutive_failures, 3)
+
+    def test_get_replay_worker_status_rejects_invalid_history_limit(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        with self.assertRaisesRegex(ValueError, "INVALID_REPLAY_WORKER_HISTORY_LIMIT"):
+            service.get_replay_worker_status(history_limit=0)
+
+    def test_get_replay_worker_status_surfaces_recent_failure_alert(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.repository.record_replay_worker_heartbeat(
+            workspace_id="ops-ws-1",
+            status="retrying",
+            iteration=7,
+            attempted_count=0,
+            dispatched_count=0,
+            failed_count=1,
+            skipped_count=0,
+            idle_polls=0,
+            consecutive_failures=1,
+            remaining_queued_count=2,
+            error_message="transient worker failure",
+            emitted_at=datetime(2026, 3, 27, 10, 0, tzinfo=UTC),
+        )
+        service.repository.record_replay_worker_heartbeat(
+            workspace_id="ops-ws-1",
+            status="idle",
+            iteration=8,
+            attempted_count=0,
+            dispatched_count=0,
+            failed_count=0,
+            skipped_count=0,
+            idle_polls=1,
+            consecutive_failures=0,
+            remaining_queued_count=0,
+            error_message=None,
+            emitted_at=datetime(2026, 3, 27, 10, 0, 5, tzinfo=UTC),
+        )
+
+        status = service.get_replay_worker_status(workspace_id="ops-ws-1", history_limit=5)
+
+        self.assertIsNotNone(status.alert)
+        assert status.alert is not None
+        self.assertEqual(status.alert.level, "warning")
+        self.assertEqual(status.alert.latest_failure_status, "retrying")
+        self.assertEqual(status.alert.latest_failure_message, "transient worker failure")
+        self.assertEqual(
+            status.alert.latest_failure_at.replace(tzinfo=None) if status.alert.latest_failure_at else None,
+            datetime(2026, 3, 27, 10, 0),
+        )
+
+    def test_update_replay_worker_alert_policy_persists_workspace_override(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        updated = service.update_replay_worker_alert_policy(
+            "ops-ws-1",
+            {
+                "warning_consecutive_failures": 2,
+                "critical_consecutive_failures": 4,
+            },
+        )
+        fetched = service.get_replay_worker_alert_policy("ops-ws-1")
+
+        self.assertEqual(updated.workspace_id, "ops-ws-1")
+        self.assertEqual(updated.warning_consecutive_failures, 2)
+        self.assertEqual(updated.critical_consecutive_failures, 4)
+        self.assertEqual(updated.source, "workspace_override")
+        self.assertIsNotNone(updated.updated_at)
+        self.assertEqual(updated.default_warning_consecutive_failures, 1)
+        self.assertEqual(updated.default_critical_consecutive_failures, 3)
+        self.assertEqual(fetched.workspace_id, "ops-ws-1")
+        self.assertEqual(fetched.source, "workspace_override")
+        self.assertEqual(fetched.critical_consecutive_failures, 4)
+
+    def test_update_replay_worker_alert_policy_records_replay_admin_audit_log(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+
+        service.update_replay_worker_alert_policy(
+            "ops-ws-1",
+            {
+                "warning_consecutive_failures": 2,
+                "critical_consecutive_failures": 4,
+            },
+            auth_context=auth_context,
+            request_id="req-policy-audit-1",
+        )
+
+        logs = service.list_replay_admin_audit_logs(
+            "ops-ws-1",
+            action_type="replay.update_worker_alert_policy",
+            actor_user_id="user-admin-1",
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0].workspace_id, "ops-ws-1")
+        self.assertEqual(logs[0].subject_type, "replay_worker_alert_policy")
+        self.assertEqual(logs[0].subject_id, "ops-ws-1")
+        self.assertEqual(logs[0].request_id, "req-policy-audit-1")
+        self.assertEqual(logs[0].actor_role, "product_admin")
+        self.assertEqual(logs[0].request_payload["warning_consecutive_failures"], 2)
+        self.assertEqual(logs[0].result_payload["source"], "workspace_override")
+
+    def test_list_replay_admin_audit_logs_supports_request_id_filter(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+
+        service.update_replay_worker_alert_policy(
+            "ops-ws-1",
+            {
+                "warning_consecutive_failures": 2,
+                "critical_consecutive_failures": 4,
+            },
+            auth_context=auth_context,
+            request_id="req-policy-audit-1",
+        )
+        service.update_replay_worker_alert_policy(
+            "ops-ws-1",
+            {
+                "warning_consecutive_failures": 3,
+                "critical_consecutive_failures": 5,
+            },
+            auth_context=auth_context,
+            request_id="req-policy-audit-2",
+        )
+
+        logs = service.list_replay_admin_audit_logs(
+            "ops-ws-1",
+            action_type="replay.update_worker_alert_policy",
+            request_id="req-policy-audit-1",
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0].request_id, "req-policy-audit-1")
+        self.assertEqual(logs[0].request_payload["warning_consecutive_failures"], 2)
+
+    def test_update_replay_worker_alert_policy_matching_default_resets_override(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.update_replay_worker_alert_policy(
+            "ops-ws-1",
+            {
+                "warning_consecutive_failures": 2,
+                "critical_consecutive_failures": 4,
+            },
+        )
+        reset = service.update_replay_worker_alert_policy(
+            "ops-ws-1",
+            {
+                "warning_consecutive_failures": 1,
+                "critical_consecutive_failures": 3,
+            },
+        )
+
+        self.assertEqual(reset.workspace_id, "ops-ws-1")
+        self.assertEqual(reset.source, "default")
+        self.assertIsNone(reset.updated_at)
+        self.assertIsNone(service.repository.get_replay_worker_alert_policy("ops-ws-1"))
+
+    def test_upsert_and_list_replay_worker_monitor_presets(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        updated = service.upsert_replay_worker_monitor_preset(
+            "ops-ws-1",
+            "night-shift",
+            {
+                "history_limit": 15,
+                "actor_user_id": "user-admin-1",
+                "request_id": "req-monitor-1",
+                "policy_audit_limit": 20,
+                "policy_audit_copy_format": "slack",
+                "policy_audit_include_summary": False,
+            },
+        )
+        presets = service.list_replay_worker_monitor_presets("ops-ws-1")
+
+        self.assertEqual(updated.workspace_id, "ops-ws-1")
+        self.assertEqual(updated.preset_name, "night-shift")
+        self.assertEqual(updated.history_limit, 15)
+        self.assertEqual(updated.policy_audit_limit, 20)
+        self.assertEqual(updated.policy_audit_copy_format, "slack")
+        self.assertFalse(updated.policy_audit_include_summary)
+        self.assertEqual(len(presets), 1)
+        self.assertEqual(presets[0].preset_name, "night-shift")
+        self.assertEqual(presets[0].actor_user_id, "user-admin-1")
+
+    def test_upsert_replay_worker_monitor_preset_records_replay_admin_audit_log(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+
+        service.upsert_replay_worker_monitor_preset(
+            "ops-ws-1",
+            "night-shift",
+            {
+                "history_limit": 10,
+                "actor_user_id": "user-admin-1",
+                "request_id": "req-monitor-1",
+                "policy_audit_limit": 5,
+                "policy_audit_copy_format": "markdown",
+                "policy_audit_include_summary": True,
+            },
+            auth_context=auth_context,
+            request_id="req-monitor-preset-audit-1",
+        )
+
+        logs = service.list_replay_admin_audit_logs(
+            "ops-ws-1",
+            action_type="replay.upsert_worker_monitor_preset",
+            actor_user_id="user-admin-1",
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0].subject_type, "replay_worker_monitor_preset")
+        self.assertEqual(logs[0].subject_id, "ops-ws-1:night-shift")
+        self.assertEqual(logs[0].request_id, "req-monitor-preset-audit-1")
+        self.assertEqual(logs[0].request_payload["preset_name"], "night-shift")
+        self.assertEqual(logs[0].result_payload["policy_audit_copy_format"], "markdown")
+
+    def test_delete_replay_worker_monitor_preset_removes_workspace_preset_and_records_audit_log(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+        service.upsert_replay_worker_monitor_preset(
+            "ops-ws-1",
+            "night-shift",
+            {
+                "history_limit": 10,
+                "policy_audit_limit": 5,
+                "policy_audit_copy_format": "plain",
+                "policy_audit_include_summary": True,
+            },
+        )
+
+        deleted = service.delete_replay_worker_monitor_preset(
+            "ops-ws-1",
+            "night-shift",
+            auth_context=auth_context,
+            request_id="req-monitor-preset-delete-1",
+        )
+        presets = service.list_replay_worker_monitor_presets("ops-ws-1")
+        logs = service.list_replay_admin_audit_logs(
+            "ops-ws-1",
+            action_type="replay.delete_worker_monitor_preset",
+            actor_user_id="user-admin-1",
+        )
+
+        self.assertEqual(deleted.workspace_id, "ops-ws-1")
+        self.assertEqual(deleted.preset_name, "night-shift")
+        self.assertTrue(deleted.deleted)
+        self.assertEqual(presets, [])
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0].subject_type, "replay_worker_monitor_preset")
+        self.assertEqual(logs[0].subject_id, "ops-ws-1:night-shift")
+        self.assertEqual(logs[0].request_id, "req-monitor-preset-delete-1")
+        self.assertTrue(logs[0].result_payload["deleted"])
+
+    def test_set_and_clear_replay_worker_monitor_default_preset(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+        service.upsert_replay_worker_monitor_preset(
+            "ops-ws-1",
+            "baseline",
+            {
+                "history_limit": 8,
+                "policy_audit_limit": 5,
+                "policy_audit_copy_format": "plain",
+                "policy_audit_include_summary": True,
+            },
+        )
+        service.upsert_replay_worker_monitor_preset(
+            "ops-ws-1",
+            "night-shift",
+            {
+                "history_limit": 10,
+                "policy_audit_limit": 5,
+                "policy_audit_copy_format": "plain",
+                "policy_audit_include_summary": True,
+            },
+        )
+
+        workspace_default = service.set_replay_worker_monitor_default_preset("ops-ws-1", "baseline")
+        shift_default = service.set_replay_worker_monitor_default_preset(
+            "ops-ws-1",
+            "night-shift",
+            shift_label="night",
+        )
+        workspace_presets = service.list_replay_worker_monitor_presets("ops-ws-1")
+        night_presets = service.list_replay_worker_monitor_presets("ops-ws-1", shift_label="night")
+        day_default = service.get_replay_worker_monitor_default_preset("ops-ws-1", shift_label="day")
+        cleared = service.clear_replay_worker_monitor_default_preset("ops-ws-1", shift_label="night")
+        cleared_night_presets = service.list_replay_worker_monitor_presets("ops-ws-1", shift_label="night")
+
+        self.assertEqual(workspace_default.workspace_id, "ops-ws-1")
+        self.assertEqual(workspace_default.preset_name, "baseline")
+        self.assertEqual(workspace_default.source, "workspace_default")
+        self.assertEqual(shift_default.workspace_id, "ops-ws-1")
+        self.assertEqual(shift_default.preset_name, "night-shift")
+        self.assertEqual(shift_default.shift_label, "night")
+        self.assertEqual(shift_default.source, "shift_default")
+        self.assertFalse(shift_default.cleared)
+        self.assertEqual(workspace_presets[0].preset_name, "baseline")
+        self.assertTrue(workspace_presets[0].is_default)
+        self.assertEqual(workspace_presets[0].default_source, "workspace_default")
+        self.assertEqual(night_presets[1].preset_name, "night-shift")
+        self.assertTrue(night_presets[1].is_default)
+        self.assertEqual(night_presets[1].default_source, "shift_default")
+        self.assertEqual(day_default.preset_name, "baseline")
+        self.assertEqual(day_default.shift_label, "day")
+        self.assertEqual(day_default.source, "workspace_default")
+        self.assertEqual(cleared.workspace_id, "ops-ws-1")
+        self.assertEqual(cleared.preset_name, "night-shift")
+        self.assertEqual(cleared.shift_label, "night")
+        self.assertEqual(cleared.source, "shift_default")
+        self.assertTrue(cleared.cleared)
+        self.assertEqual(cleared_night_presets[0].preset_name, "baseline")
+        self.assertTrue(cleared_night_presets[0].is_default)
+        self.assertEqual(cleared_night_presets[0].default_source, "workspace_default")
+        self.assertEqual(cleared_night_presets[1].preset_name, "night-shift")
+        self.assertFalse(cleared_night_presets[1].is_default)
+
+    def test_set_replay_worker_monitor_default_preset_records_replay_admin_audit_logs(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+        service.upsert_replay_worker_monitor_preset(
+            "ops-ws-1",
+            "night-shift",
+            {
+                "history_limit": 10,
+                "policy_audit_limit": 5,
+                "policy_audit_copy_format": "plain",
+                "policy_audit_include_summary": True,
+            },
+        )
+
+        service.set_replay_worker_monitor_default_preset(
+            "ops-ws-1",
+            "night-shift",
+            shift_label="night",
+            auth_context=auth_context,
+            request_id="req-monitor-default-1",
+        )
+        service.clear_replay_worker_monitor_default_preset(
+            "ops-ws-1",
+            shift_label="night",
+            auth_context=auth_context,
+            request_id="req-monitor-default-2",
+        )
+        set_logs = service.list_replay_admin_audit_logs(
+            "ops-ws-1",
+            action_type="replay.set_worker_monitor_default_preset",
+            actor_user_id="user-admin-1",
+        )
+        clear_logs = service.list_replay_admin_audit_logs(
+            "ops-ws-1",
+            action_type="replay.clear_worker_monitor_default_preset",
+            actor_user_id="user-admin-1",
+        )
+
+        self.assertEqual(len(set_logs), 1)
+        self.assertEqual(set_logs[0].subject_type, "replay_worker_monitor_preset_default")
+        self.assertEqual(set_logs[0].request_id, "req-monitor-default-1")
+        self.assertEqual(set_logs[0].request_payload["shift_label"], "night")
+        self.assertEqual(set_logs[0].result_payload["preset_name"], "night-shift")
+        self.assertEqual(set_logs[0].result_payload["source"], "shift_default")
+        self.assertEqual(len(clear_logs), 1)
+        self.assertEqual(clear_logs[0].subject_type, "replay_worker_monitor_preset_default")
+        self.assertEqual(clear_logs[0].request_id, "req-monitor-default-2")
+        self.assertEqual(clear_logs[0].request_payload["shift_label"], "night")
+        self.assertEqual(clear_logs[0].result_payload["source"], "shift_default")
+        self.assertTrue(clear_logs[0].result_payload["cleared"])
+
+    def test_update_and_resolve_replay_worker_monitor_shift_schedule(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        updated = service.update_replay_worker_monitor_shift_schedule(
+            "ops-ws-1",
+            {
+                "timezone": "UTC",
+                "windows": [
+                    {"shift_label": "day", "start_time": "08:00", "end_time": "20:00"},
+                    {"shift_label": "night", "start_time": "20:00", "end_time": "08:00"},
+                ],
+                "date_overrides": [
+                    {
+                        "date": "2026-03-27",
+                        "note": "Holiday coverage",
+                        "windows": [
+                            {"shift_label": "holiday", "start_time": "10:00", "end_time": "14:00"},
+                        ],
+                    }
+                ],
+                "date_range_overrides": [
+                    {
+                        "start_date": "2026-03-29",
+                        "end_date": "2026-03-31",
+                        "note": "Migration week",
+                        "windows": [
+                            {"shift_label": "migration", "start_time": "09:00", "end_time": "18:00"},
+                        ],
+                    }
+                ],
+            },
+        )
+        current = service.get_replay_worker_monitor_shift_schedule("ops-ws-1")
+        resolved_override = service.resolve_replay_worker_monitor_shift_label(
+            "ops-ws-1",
+            evaluated_at=datetime(2026, 3, 27, 11, 30, tzinfo=UTC),
+        )
+        resolved_override_gap = service.resolve_replay_worker_monitor_shift_label(
+            "ops-ws-1",
+            evaluated_at=datetime(2026, 3, 27, 15, 0, tzinfo=UTC),
+        )
+        resolved_range = service.resolve_replay_worker_monitor_shift_label(
+            "ops-ws-1",
+            evaluated_at=datetime(2026, 3, 30, 10, 30, tzinfo=UTC),
+        )
+        resolved_range_gap = service.resolve_replay_worker_monitor_shift_label(
+            "ops-ws-1",
+            evaluated_at=datetime(2026, 3, 30, 22, 0, tzinfo=UTC),
+        )
+        resolved_day = service.resolve_replay_worker_monitor_shift_label(
+            "ops-ws-1",
+            evaluated_at=datetime(2026, 3, 28, 9, 30, tzinfo=UTC),
+        )
+        resolved_night = service.resolve_replay_worker_monitor_shift_label(
+            "ops-ws-1",
+            evaluated_at=datetime(2026, 3, 28, 21, 30, tzinfo=UTC),
+        )
+        cleared = service.clear_replay_worker_monitor_shift_schedule("ops-ws-1")
+        resolved_none = service.resolve_replay_worker_monitor_shift_label(
+            "ops-ws-1",
+            evaluated_at=datetime(2026, 3, 28, 21, 30, tzinfo=UTC),
+        )
+
+        self.assertEqual(updated.workspace_id, "ops-ws-1")
+        self.assertEqual(updated.timezone, "UTC")
+        self.assertEqual(len(updated.windows), 2)
+        self.assertEqual(len(updated.date_overrides), 1)
+        self.assertEqual(len(updated.date_range_overrides), 1)
+        self.assertEqual(current.windows[0].shift_label, "day")
+        self.assertEqual(current.date_overrides[0].date, "2026-03-27")
+        self.assertEqual(current.date_range_overrides[0].start_date, "2026-03-29")
+        self.assertEqual(resolved_override.shift_label, "holiday")
+        self.assertEqual(resolved_override.source, "date_override")
+        self.assertEqual(resolved_override.override_date, "2026-03-27")
+        self.assertEqual(resolved_override.override_note, "Holiday coverage")
+        self.assertEqual(resolved_override_gap.source, "date_override")
+        self.assertIsNone(resolved_override_gap.shift_label)
+        self.assertEqual(resolved_range.shift_label, "migration")
+        self.assertEqual(resolved_range.source, "date_range_override")
+        self.assertEqual(resolved_range.override_range_start_date, "2026-03-29")
+        self.assertEqual(resolved_range.override_range_end_date, "2026-03-31")
+        self.assertEqual(resolved_range.override_note, "Migration week")
+        self.assertEqual(resolved_range_gap.source, "date_range_override")
+        self.assertIsNone(resolved_range_gap.shift_label)
+        self.assertEqual(resolved_day.shift_label, "day")
+        self.assertEqual(resolved_day.source, "schedule")
+        self.assertEqual(resolved_day.matched_window.shift_label, "day")
+        self.assertEqual(resolved_night.shift_label, "night")
+        self.assertEqual(resolved_night.source, "schedule")
+        self.assertEqual(cleared.workspace_id, "ops-ws-1")
+        self.assertTrue(cleared.cleared)
+        self.assertIsNone(resolved_none.shift_label)
+        self.assertEqual(resolved_none.source, "none")
+
+    def test_update_and_clear_replay_worker_monitor_shift_schedule_records_replay_admin_audit_logs(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+
+        service.update_replay_worker_monitor_shift_schedule(
+            "ops-ws-1",
+            {
+                "timezone": "Asia/Shanghai",
+                "windows": [
+                    {"shift_label": "day", "start_time": "09:00", "end_time": "21:00"},
+                    {"shift_label": "night", "start_time": "21:00", "end_time": "09:00"},
+                ],
+                "date_overrides": [
+                    {
+                        "date": "2026-03-27",
+                        "note": "Temporary rotation",
+                        "windows": [
+                            {"shift_label": "sre", "start_time": "09:00", "end_time": "17:00"},
+                        ],
+                    }
+                ],
+                "date_range_overrides": [
+                    {
+                        "start_date": "2026-03-28",
+                        "end_date": "2026-03-30",
+                        "note": "Release week",
+                        "windows": [
+                            {"shift_label": "release", "start_time": "08:00", "end_time": "20:00"},
+                        ],
+                    }
+                ],
+            },
+            auth_context=auth_context,
+            request_id="req-monitor-shift-schedule-1",
+        )
+        service.clear_replay_worker_monitor_shift_schedule(
+            "ops-ws-1",
+            auth_context=auth_context,
+            request_id="req-monitor-shift-schedule-2",
+        )
+        update_logs = service.list_replay_admin_audit_logs(
+            "ops-ws-1",
+            action_type="replay.update_worker_monitor_shift_schedule",
+            actor_user_id="user-admin-1",
+        )
+        clear_logs = service.list_replay_admin_audit_logs(
+            "ops-ws-1",
+            action_type="replay.clear_worker_monitor_shift_schedule",
+            actor_user_id="user-admin-1",
+        )
+
+        self.assertEqual(len(update_logs), 1)
+        self.assertEqual(update_logs[0].request_id, "req-monitor-shift-schedule-1")
+        self.assertEqual(update_logs[0].request_payload["timezone"], "Asia/Shanghai")
+        self.assertEqual(update_logs[0].request_payload["date_overrides"][0]["date"], "2026-03-27")
+        self.assertEqual(update_logs[0].request_payload["date_range_overrides"][0]["start_date"], "2026-03-28")
+        self.assertEqual(update_logs[0].result_payload["windows"][1]["shift_label"], "night")
+        self.assertEqual(update_logs[0].result_payload["date_overrides"][0]["windows"][0]["shift_label"], "sre")
+        self.assertEqual(update_logs[0].result_payload["date_range_overrides"][0]["windows"][0]["shift_label"], "release")
+        self.assertEqual(len(clear_logs), 1)
+        self.assertEqual(clear_logs[0].request_id, "req-monitor-shift-schedule-2")
+        self.assertTrue(clear_logs[0].result_payload["cleared"])
+
+    def test_get_replay_worker_status_escalates_to_critical_at_failure_threshold(self) -> None:
+        service = build_app_service(
+            replay_worker_alert_warning_consecutive_failures=1,
+            replay_worker_alert_critical_consecutive_failures=2,
+        )
+        self.addCleanup(service.close)
+
+        service.repository.record_replay_worker_heartbeat(
+            workspace_id="ops-ws-1",
+            status="retrying",
+            iteration=9,
+            attempted_count=0,
+            dispatched_count=0,
+            failed_count=2,
+            skipped_count=0,
+            idle_polls=0,
+            consecutive_failures=2,
+            remaining_queued_count=2,
+            error_message=None,
+            emitted_at=datetime(2026, 3, 27, 10, 5, tzinfo=UTC),
+        )
+
+        status = service.get_replay_worker_status(workspace_id="ops-ws-1", history_limit=5)
+
+        self.assertIsNotNone(status.alert)
+        assert status.alert is not None
+        self.assertEqual(status.alert.level, "critical")
+        self.assertIn("threshold", status.alert.headline.lower())
+        self.assertIn("critical threshold of 2", status.alert.detail)
+
+    def test_get_replay_worker_status_uses_workspace_override_threshold(self) -> None:
+        service = build_app_service(
+            replay_worker_alert_warning_consecutive_failures=1,
+            replay_worker_alert_critical_consecutive_failures=5,
+        )
+        self.addCleanup(service.close)
+        service.update_replay_worker_alert_policy(
+            "ops-ws-1",
+            {
+                "warning_consecutive_failures": 2,
+                "critical_consecutive_failures": 2,
+            },
+        )
+
+        service.repository.record_replay_worker_heartbeat(
+            workspace_id="ops-ws-1",
+            status="retrying",
+            iteration=11,
+            attempted_count=0,
+            dispatched_count=0,
+            failed_count=2,
+            skipped_count=0,
+            idle_polls=0,
+            consecutive_failures=2,
+            remaining_queued_count=1,
+            error_message=None,
+            emitted_at=datetime(2026, 3, 27, 10, 8, tzinfo=UTC),
+        )
+
+        status = service.get_replay_worker_status(workspace_id="ops-ws-1", history_limit=5)
+
+        self.assertIsNotNone(status.alert)
+        assert status.alert is not None
+        self.assertEqual(status.alert.level, "critical")
+        self.assertIsNotNone(status.policy)
+        assert status.policy is not None
+        self.assertEqual(status.policy.source, "workspace_override")
+        self.assertEqual(status.policy.critical_consecutive_failures, 2)
 
     def test_get_approval_task_returns_linked_task(self) -> None:
         service = build_app_service()
@@ -1224,6 +2061,10 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(result.current_state, "resolve")
         self.assertEqual(state.current_state, "resolve")
         self.assertEqual(state.workflow_type, "opsgraph_incident")
+        self.assertEqual(state.raw_state["service_id"], "checkout-api")
+        self.assertTrue(state.raw_state["recommendation_ids"])
+        self.assertTrue(state.raw_state["comms_draft_ids"])
+        self.assertTrue(state.raw_state["top_hypothesis_ids"])
 
     def test_respond_to_incident_emits_incident_updated_event(self) -> None:
         service = build_app_service()
@@ -1280,6 +2121,9 @@ class OpsGraphServiceTests(unittest.TestCase):
             ).first()
             self.assertIsNotNone(postmortem_row)
             replay_case_row = session.get(ReplayCaseRow, postmortem_row.replay_case_id)
+            artifact_row = session.get(ArtifactBlobRow, postmortem.artifact_id)
+            self.assertIsNotNone(artifact_row)
+            artifact_payload = json.loads(artifact_row.content_text)
 
         self.assertEqual(resolved.incident_status, "resolved")
         self.assertEqual(result.workflow_name, "opsgraph_retrospective")
@@ -1292,10 +2136,15 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertIsNotNone(replay_case_row)
         self.assertEqual(replay_case_row.incident_id, "incident-1")
         self.assertEqual(replay_case_row.input_snapshot_payload["incident_id"], "incident-1")
-        artifact_row = session.get(ArtifactBlobRow, postmortem.artifact_id)
-        self.assertIsNotNone(artifact_row)
-        self.assertIn("incident_key", artifact_row.content_text)
-        self.assertIn("timeline", artifact_row.content_text)
+        self.assertEqual(artifact_payload["incident_key"], "INC-2026-0001")
+        self.assertIn("timeline", artifact_payload)
+        self.assertIn("postmortem_markdown", artifact_payload)
+        self.assertTrue(artifact_payload["follow_up_actions"])
+        self.assertTrue(artifact_payload["replay_capture_hints"])
+        retrospective_state = service.get_workflow_state("opsgraph-retro-1")
+        self.assertEqual(retrospective_state.raw_state["postmortem_id"], postmortem.postmortem_id)
+        self.assertEqual(retrospective_state.raw_state["postmortem_status"], "draft")
+        self.assertEqual(retrospective_state.raw_state["incident_status"], "closed")
 
     def test_build_retrospective_emits_postmortem_ready_event(self) -> None:
         service = build_app_service()
@@ -1435,6 +2284,66 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertTrue(any(item.replay_run_id == queued.replay_run_id for item in queued_runs))
         self.assertFalse(any(item.replay_run_id == queued.replay_run_id for item in completed_runs))
         self.assertTrue(any(item.replay_run_id == completed.replay_run_id for item in completed_runs))
+
+    def test_process_queued_replays_executes_oldest_queued_runs(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+        newer = service.start_replay_run(
+            replay_run_command(model_bundle_version="opsgraph-batch-v2"),
+            idempotency_key="replay-batch-newer",
+        )
+        older = service.start_replay_run(
+            replay_run_command(model_bundle_version="opsgraph-batch-v1"),
+            idempotency_key="replay-batch-older",
+        )
+        with service.repository.session_factory.begin() as session:
+            older_row = session.get(ReplayRunRow, older.replay_run_id)
+            newer_row = session.get(ReplayRunRow, newer.replay_run_id)
+            self.assertIsNotNone(older_row)
+            self.assertIsNotNone(newer_row)
+            older_row.created_at = older_row.created_at - timedelta(minutes=5)
+
+        processed = service.process_queued_replays(
+            "ops-ws-1",
+            limit=1,
+            auth_context=auth_context,
+            request_id="req-replay-process-1",
+        )
+        queued_runs = service.list_replays("ops-ws-1", status="queued")
+        execute_logs = service.list_audit_logs(
+            "incident-1",
+            action_type="replay.execute",
+            actor_user_id="user-admin-1",
+        )
+
+        self.assertEqual(processed.workspace_id, "ops-ws-1")
+        self.assertEqual(processed.queued_count, 2)
+        self.assertEqual(processed.processed_count, 1)
+        self.assertEqual(processed.completed_count, 1)
+        self.assertEqual(processed.failed_count, 0)
+        self.assertEqual(processed.skipped_count, 0)
+        self.assertEqual(processed.remaining_queued_count, 1)
+        self.assertEqual(len(processed.items), 1)
+        self.assertEqual(processed.items[0].replay_run_id, older.replay_run_id)
+        self.assertEqual(processed.items[0].status, "completed")
+        self.assertEqual(len(queued_runs), 1)
+        self.assertEqual(queued_runs[0].replay_run_id, newer.replay_run_id)
+        self.assertEqual(len(execute_logs), 1)
+        self.assertEqual(execute_logs[0].request_id, "req-replay-process-1")
+        self.assertEqual(execute_logs[0].subject_id, older.replay_run_id)
+
+    def test_process_queued_replays_rejects_invalid_batch_limit(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        with self.assertRaisesRegex(ValueError, "INVALID_REPLAY_BATCH_LIMIT"):
+            service.process_queued_replays("ops-ws-1", limit=0)
 
     def test_replay_status_rejects_transition_from_terminal_state(self) -> None:
         service = build_app_service()

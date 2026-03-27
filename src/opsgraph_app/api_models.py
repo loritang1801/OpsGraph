@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -106,6 +107,23 @@ class AuditLogSummary(OpsGraphModel):
     created_at: datetime
 
 
+class ReplayAdminAuditLogSummary(OpsGraphModel):
+    audit_log_id: str = Field(serialization_alias="id")
+    workspace_id: str
+    action_type: str
+    actor_type: str = "system"
+    actor_user_id: str | None = None
+    actor_role: str | None = None
+    session_id: str | None = None
+    request_id: str | None = None
+    idempotency_key: str | None = None
+    subject_type: str | None = None
+    subject_id: str | None = None
+    request_payload: dict[str, Any] = Field(default_factory=dict)
+    result_payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
 class PostmortemSummary(OpsGraphModel):
     postmortem_id: str = Field(serialization_alias="id")
     incident_id: str
@@ -128,6 +146,281 @@ class ReplayRunSummary(OpsGraphModel):
     current_state: str | None = None
     error_message: str | None = None
     created_at: datetime
+
+
+class ReplayQueueProcessResponse(OpsGraphModel):
+    workspace_id: str
+    queued_count: int
+    processed_count: int
+    completed_count: int
+    failed_count: int
+    skipped_count: int
+    remaining_queued_count: int
+    items: list[ReplayRunSummary] = Field(default_factory=list)
+
+
+class ReplayWorkerStatusSummary(OpsGraphModel):
+    workspace_id: str
+    status: str
+    iteration: int
+    attempted_count: int
+    dispatched_count: int
+    failed_count: int
+    skipped_count: int
+    idle_polls: int
+    consecutive_failures: int
+    remaining_queued_count: int
+    error_message: str | None = None
+    last_seen_at: datetime
+
+
+class ReplayWorkerHeartbeatSummary(OpsGraphModel):
+    workspace_id: str
+    status: str
+    iteration: int
+    attempted_count: int
+    dispatched_count: int
+    failed_count: int
+    skipped_count: int
+    idle_polls: int
+    consecutive_failures: int
+    remaining_queued_count: int
+    error_message: str | None = None
+    emitted_at: datetime
+
+
+class ReplayWorkerAlertSummary(OpsGraphModel):
+    level: Literal["healthy", "warning", "critical"]
+    headline: str
+    detail: str
+    latest_failure_status: str | None = None
+    latest_failure_at: datetime | None = None
+    latest_failure_message: str | None = None
+
+
+class ReplayWorkerAlertPolicySummary(OpsGraphModel):
+    workspace_id: str | None = None
+    warning_consecutive_failures: int = 1
+    critical_consecutive_failures: int = 3
+    default_warning_consecutive_failures: int = 1
+    default_critical_consecutive_failures: int = 3
+    source: Literal["default", "workspace_override"] = "default"
+    updated_at: datetime | None = None
+
+
+class ReplayWorkerAlertPolicyUpdateCommand(OpsGraphModel):
+    warning_consecutive_failures: int
+    critical_consecutive_failures: int
+
+
+class ReplayWorkerMonitorPresetUpsertCommand(OpsGraphModel):
+    history_limit: int = 10
+    actor_user_id: str | None = None
+    request_id: str | None = None
+    policy_audit_limit: int = 5
+    policy_audit_copy_format: str = "plain"
+    policy_audit_include_summary: bool = True
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "ReplayWorkerMonitorPresetUpsertCommand":
+        if self.history_limit < 1:
+            raise ValueError("INVALID_REPLAY_MONITOR_PRESET_HISTORY_LIMIT")
+        if self.policy_audit_limit < 1:
+            raise ValueError("INVALID_REPLAY_MONITOR_PRESET_AUDIT_LIMIT")
+        if self.policy_audit_copy_format not in {"plain", "markdown", "slack"}:
+            raise ValueError("INVALID_REPLAY_MONITOR_PRESET_COPY_FORMAT")
+        self.actor_user_id = (self.actor_user_id or "").strip() or None
+        self.request_id = (self.request_id or "").strip() or None
+        return self
+
+
+class ReplayWorkerMonitorPresetSummary(OpsGraphModel):
+    workspace_id: str
+    preset_name: str
+    history_limit: int = 10
+    actor_user_id: str | None = None
+    request_id: str | None = None
+    policy_audit_limit: int = 5
+    policy_audit_copy_format: Literal["plain", "markdown", "slack"] = "plain"
+    policy_audit_include_summary: bool = True
+    is_default: bool = False
+    default_source: Literal["none", "workspace_default", "shift_default"] = "none"
+    updated_at: datetime
+
+
+class ReplayWorkerMonitorPresetDeleteResponse(OpsGraphModel):
+    workspace_id: str
+    preset_name: str
+    deleted: bool = True
+
+
+class ReplayWorkerMonitorDefaultPresetResponse(OpsGraphModel):
+    workspace_id: str
+    preset_name: str | None = None
+    shift_label: str | None = None
+    source: Literal["none", "workspace_default", "shift_default"] = "none"
+    updated_at: datetime | None = None
+    cleared: bool = False
+
+
+class ReplayWorkerMonitorShiftWindow(OpsGraphModel):
+    shift_label: str
+    start_time: str
+    end_time: str
+
+    @staticmethod
+    def _normalize_hhmm(value: str, *, error_code: str) -> str:
+        normalized = str(value or "").strip()
+        parts = normalized.split(":")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            raise ValueError(error_code)
+        hour, minute = (int(parts[0]), int(parts[1]))
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            raise ValueError(error_code)
+        return f"{hour:02d}:{minute:02d}"
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "ReplayWorkerMonitorShiftWindow":
+        self.shift_label = str(self.shift_label or "").strip()
+        if not self.shift_label:
+            raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_LABEL")
+        self.start_time = self._normalize_hhmm(
+            self.start_time,
+            error_code="INVALID_REPLAY_MONITOR_SHIFT_START_TIME",
+        )
+        self.end_time = self._normalize_hhmm(
+            self.end_time,
+            error_code="INVALID_REPLAY_MONITOR_SHIFT_END_TIME",
+        )
+        if self.start_time == self.end_time:
+            raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_WINDOW")
+        return self
+
+
+class ReplayWorkerMonitorShiftDateOverride(OpsGraphModel):
+    date: str
+    windows: list[ReplayWorkerMonitorShiftWindow] = Field(default_factory=list)
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "ReplayWorkerMonitorShiftDateOverride":
+        normalized_date = str(self.date or "").strip()
+        try:
+            date.fromisoformat(normalized_date)
+        except ValueError as exc:
+            raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_OVERRIDE_DATE") from exc
+        self.date = normalized_date
+        self.note = (self.note or "").strip() or None
+        seen_labels: set[str] = set()
+        for window in self.windows:
+            if window.shift_label in seen_labels:
+                raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_DUPLICATE_LABEL")
+            seen_labels.add(window.shift_label)
+        return self
+
+
+class ReplayWorkerMonitorShiftDateRangeOverride(OpsGraphModel):
+    start_date: str
+    end_date: str
+    windows: list[ReplayWorkerMonitorShiftWindow] = Field(default_factory=list)
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "ReplayWorkerMonitorShiftDateRangeOverride":
+        normalized_start_date = str(self.start_date or "").strip()
+        normalized_end_date = str(self.end_date or "").strip()
+        try:
+            start_value = date.fromisoformat(normalized_start_date)
+        except ValueError as exc:
+            raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_RANGE_START_DATE") from exc
+        try:
+            end_value = date.fromisoformat(normalized_end_date)
+        except ValueError as exc:
+            raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_RANGE_END_DATE") from exc
+        if end_value < start_value:
+            raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_RANGE")
+        self.start_date = normalized_start_date
+        self.end_date = normalized_end_date
+        self.note = (self.note or "").strip() or None
+        seen_labels: set[str] = set()
+        for window in self.windows:
+            if window.shift_label in seen_labels:
+                raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_DUPLICATE_LABEL")
+            seen_labels.add(window.shift_label)
+        return self
+
+
+class ReplayWorkerMonitorShiftScheduleSummary(OpsGraphModel):
+    workspace_id: str
+    timezone: str = "UTC"
+    windows: list[ReplayWorkerMonitorShiftWindow] = Field(default_factory=list)
+    date_overrides: list[ReplayWorkerMonitorShiftDateOverride] = Field(default_factory=list)
+    date_range_overrides: list[ReplayWorkerMonitorShiftDateRangeOverride] = Field(default_factory=list)
+    updated_at: datetime | None = None
+
+
+class ReplayWorkerMonitorShiftScheduleUpdateCommand(OpsGraphModel):
+    timezone: str = "UTC"
+    windows: list[ReplayWorkerMonitorShiftWindow] = Field(default_factory=list)
+    date_overrides: list[ReplayWorkerMonitorShiftDateOverride] = Field(default_factory=list)
+    date_range_overrides: list[ReplayWorkerMonitorShiftDateRangeOverride] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "ReplayWorkerMonitorShiftScheduleUpdateCommand":
+        self.timezone = str(self.timezone or "").strip() or "UTC"
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_TIMEZONE") from exc
+        seen_labels: set[str] = set()
+        for window in self.windows:
+            if window.shift_label in seen_labels:
+                raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_DUPLICATE_LABEL")
+            seen_labels.add(window.shift_label)
+        seen_dates: set[str] = set()
+        for override in self.date_overrides:
+            if override.date in seen_dates:
+                raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_DUPLICATE_OVERRIDE_DATE")
+            seen_dates.add(override.date)
+        sorted_ranges = sorted(
+            self.date_range_overrides,
+            key=lambda item: (item.start_date, item.end_date),
+        )
+        previous_end: date | None = None
+        for override in sorted_ranges:
+            current_start = date.fromisoformat(override.start_date)
+            current_end = date.fromisoformat(override.end_date)
+            if previous_end is not None and current_start <= previous_end:
+                raise ValueError("INVALID_REPLAY_MONITOR_SHIFT_OVERLAPPING_RANGE_OVERRIDE")
+            previous_end = current_end
+        return self
+
+
+class ReplayWorkerMonitorShiftScheduleDeleteResponse(OpsGraphModel):
+    workspace_id: str
+    cleared: bool = True
+
+
+class ReplayWorkerMonitorResolvedShiftResponse(OpsGraphModel):
+    workspace_id: str
+    timezone: str | None = None
+    evaluated_at: datetime
+    shift_label: str | None = None
+    source: Literal["none", "schedule", "date_override", "date_range_override"] = "none"
+    matched_window: ReplayWorkerMonitorShiftWindow | None = None
+    override_date: str | None = None
+    override_range_start_date: str | None = None
+    override_range_end_date: str | None = None
+    override_note: str | None = None
+    updated_at: datetime | None = None
+
+
+class ReplayWorkerStatusResponse(OpsGraphModel):
+    workspace_id: str | None = None
+    current: ReplayWorkerStatusSummary | None = None
+    history: list[ReplayWorkerHeartbeatSummary] = Field(default_factory=list)
+    alert: ReplayWorkerAlertSummary | None = None
+    policy: ReplayWorkerAlertPolicySummary | None = None
 
 
 class ReplayCaseSummary(OpsGraphModel):
@@ -381,6 +674,7 @@ class IncidentResponseCommand(OpsGraphModel):
     current_incident_candidates: list[dict[str, Any]] = Field(default_factory=list)
     context_bundle_id: str = "context-1"
     current_fact_set_version: int = 1
+    service_id: str | None = None
     confirmed_fact_refs: list[dict[str, Any]] = Field(default_factory=list)
     top_hypothesis_refs: list[dict[str, Any]] = Field(default_factory=list)
     target_channels: list[str] = Field(default_factory=lambda: ["internal_slack"])
@@ -419,6 +713,38 @@ class OpsGraphWorkflowStateResponse(OpsGraphModel):
     raw_state: dict[str, Any] = Field(default_factory=dict)
 
 
+class RuntimeCapability(OpsGraphModel):
+    requested_mode: str
+    effective_mode: str
+    backend_id: str
+    fallback_reason: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeCapabilitiesResponse(OpsGraphModel):
+    product: Literal["opsgraph"] = "opsgraph"
+    model_provider: RuntimeCapability
+    tooling: dict[str, RuntimeCapability] = Field(default_factory=dict)
+    replay_worker: ReplayWorkerStatusSummary | None = None
+    replay_worker_history: list[ReplayWorkerHeartbeatSummary] = Field(default_factory=list)
+    replay_worker_alert: ReplayWorkerAlertSummary | None = None
+    replay_worker_alert_policy: ReplayWorkerAlertPolicySummary | None = None
+
+
+class HealthRuntimeSummary(OpsGraphModel):
+    model_provider_mode: str
+    model_backend_id: str
+    tooling_profile: Literal["product-runtime"] = "product-runtime"
+    tooling_modes: dict[str, str] = Field(default_factory=dict)
+    tooling_backends: dict[str, str] = Field(default_factory=dict)
+    replay_worker_status: str | None = None
+    replay_worker_last_seen_at: datetime | None = None
+    replay_worker_workspace_id: str | None = None
+    replay_worker_remaining_queued_count: int | None = None
+    replay_worker_alert_level: Literal["healthy", "warning", "critical"] | None = None
+
+
 class HealthResponse(OpsGraphModel):
     status: Literal["ok"]
     product: Literal["opsgraph"]
+    runtime_summary: HealthRuntimeSummary | None = None

@@ -1,0 +1,17 @@
+{
+  "services": [
+    {
+      "service_id": "checkout-api",
+      "name": "Checkout API",
+      "owner_team": "payments-sre",
+      "dependency_names": [
+        "postgres",
+        "redis"
+      ],
+      "runbook_refs": [
+        "runbook-checkout-api-rollback",
+        "runbook-checkout-api-stability"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "service_id": "checkout-api",
+  "incident_id": "incident-1",
+  "limit": 2,
+  "url_template": "https://deployments.example.test/services/{service_id}/deployments?incident={incident_id}&limit={limit}",
+  "expected_url": "https://deployments.example.test/services/checkout-api/deployments?incident=incident-1&limit=2"
+}

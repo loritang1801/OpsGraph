@@ -1,0 +1,7 @@
+{
+  "service_id": "checkout-api",
+  "search_query": "checkout api",
+  "limit": 5,
+  "url_template": "https://services.example.test/registry?service={service_id}&query={search_query}&limit={limit}",
+  "expected_url": "https://services.example.test/registry?service=checkout-api&query=checkout%20api&limit=5"
+}

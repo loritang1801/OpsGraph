@@ -20,6 +20,7 @@ class SqlAlchemyStoreTests(unittest.TestCase):
             poolclass=StaticPool,
         )
         self.stores = create_sqlalchemy_runtime_stores(engine=engine)
+        self.addCleanup(self.stores.dispose)
 
     def test_state_store_round_trip(self) -> None:
         record = WorkflowStateRecord(

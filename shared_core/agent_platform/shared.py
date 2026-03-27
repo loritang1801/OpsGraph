@@ -130,6 +130,9 @@ class CitationRef(SchemaModel):
 class AuthorizationContext(SchemaModel):
     organization_id: str
     workspace_id: str
+    user_id: str | None = None
+    role: str | None = None
+    session_id: str | None = None
     connection_id: str | None = None
 
 
@@ -138,6 +141,7 @@ class ToolCallEnvelope(SchemaModel):
     tool_name: str
     tool_version: str
     workflow_run_id: str
+    node_name: str | None = None
     subject_type: str
     subject_id: str
     arguments: dict[str, Any] = Field(default_factory=dict)
@@ -198,6 +202,9 @@ class SharedWorkflowStateEnvelope(SchemaModel):
     workflow_run_id: str
     organization_id: str
     workspace_id: str
+    user_id: str | None = None
+    role: str | None = None
+    session_id: str | None = None
     workflow_type: str
     subject_type: str
     subject_id: str
