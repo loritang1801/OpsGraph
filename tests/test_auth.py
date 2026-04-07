@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +17,7 @@ from opsgraph_app.bootstrap import build_app_service
 from opsgraph_app.routes import create_fastapi_app
 from opsgraph_app.shared_runtime import load_shared_agent_platform
 from opsgraph_app.worker import OpsGraphReplayWorker
+from tests._repo_temp import cleanup_repo_tempdir, create_repo_tempdir
 
 _AP = load_shared_agent_platform()
 TestClient = _AP.fastapi_test_client_class()
@@ -33,9 +33,9 @@ _AUTH_ENV_KEYS = (
 )
 
 
-def _create_auth_database_url() -> tuple[tempfile.TemporaryDirectory, str]:
-    temp_dir = tempfile.TemporaryDirectory(prefix="opsgraph-auth-")
-    database_url = f"sqlite+pysqlite:///{Path(temp_dir.name, 'opsgraph.db').resolve().as_posix()}"
+def _create_auth_database_url() -> tuple[Path, str]:
+    temp_dir = create_repo_tempdir("opsgraph-auth-")
+    database_url = f"sqlite+pysqlite:///{(temp_dir / 'opsgraph.db').resolve().as_posix()}"
     return temp_dir, database_url
 
 
@@ -124,7 +124,7 @@ class OpsGraphAuthServiceTests(unittest.TestCase):
 
     def test_persistent_auth_defaults_reject_header_only_fallback(self) -> None:
         temp_dir, database_url = _create_auth_database_url()
-        self.addCleanup(temp_dir.cleanup)
+        self.addCleanup(cleanup_repo_tempdir, temp_dir)
         with _patched_auth_env():
             service = build_app_service(database_url=database_url)
         self.addCleanup(service.close)
@@ -143,7 +143,7 @@ class OpsGraphAuthServiceTests(unittest.TestCase):
 
     def test_persistent_auth_defaults_do_not_seed_demo_users(self) -> None:
         temp_dir, database_url = _create_auth_database_url()
-        self.addCleanup(temp_dir.cleanup)
+        self.addCleanup(cleanup_repo_tempdir, temp_dir)
         with _patched_auth_env():
             service = build_app_service(database_url=database_url)
         self.addCleanup(service.close)
@@ -161,7 +161,7 @@ class OpsGraphAuthServiceTests(unittest.TestCase):
 
     def test_persistent_auth_can_seed_bootstrap_admin(self) -> None:
         temp_dir, database_url = _create_auth_database_url()
-        self.addCleanup(temp_dir.cleanup)
+        self.addCleanup(cleanup_repo_tempdir, temp_dir)
         with _patched_auth_env(
             OPSGRAPH_BOOTSTRAP_ADMIN_EMAIL="bootstrap-admin@example.com",
             OPSGRAPH_BOOTSTRAP_ADMIN_PASSWORD="bootstrap-secret",
@@ -194,7 +194,7 @@ class OpsGraphAuthServiceTests(unittest.TestCase):
 
     def test_persistent_auth_can_reenable_header_fallback_via_env(self) -> None:
         temp_dir, database_url = _create_auth_database_url()
-        self.addCleanup(temp_dir.cleanup)
+        self.addCleanup(cleanup_repo_tempdir, temp_dir)
         with _patched_auth_env(OPSGRAPH_ALLOW_HEADER_AUTH_FALLBACK="true"):
             service = build_app_service(database_url=database_url)
         self.addCleanup(service.close)
@@ -214,7 +214,7 @@ class OpsGraphAuthServiceTests(unittest.TestCase):
 
     def test_persistent_auth_can_reenable_demo_seed_via_env(self) -> None:
         temp_dir, database_url = _create_auth_database_url()
-        self.addCleanup(temp_dir.cleanup)
+        self.addCleanup(cleanup_repo_tempdir, temp_dir)
         with _patched_auth_env(OPSGRAPH_SEED_DEMO_AUTH="true"):
             service = build_app_service(database_url=database_url)
         self.addCleanup(service.close)
@@ -479,11 +479,12 @@ class OpsGraphRouteAuthorizationTests(unittest.TestCase):
             expected_fields={
                 "diagnostic_run_id": "runtime-smoke-stub-1",
                 "providers.0": "deployment_lookup",
-                "summary.success_count": 0,
-                "summary.skipped_count": 1,
+                "summary.success_count": 1,
+                "summary.skipped_count": 0,
                 "summary.failed_count": 0,
                 "results.0.provider": "deployment_lookup",
-                "results.0.status": "skipped",
+                "results.0.status": "success",
+                "results.0.execution_mode": "local_fallback",
             },
         )
 
@@ -515,7 +516,8 @@ class OpsGraphRouteAuthorizationTests(unittest.TestCase):
                 "diagnostic_run_id": "runtime-smoke-stub-1",
                 "actor_role": "product_admin",
                 "request_payload.providers.0": "deployment_lookup",
-                "response.summary.skipped_count": 1,
+                "response.summary.success_count": 1,
+                "response.results.0.execution_mode": "local_fallback",
             },
         )
 
@@ -573,7 +575,7 @@ class OpsGraphRouteAuthorizationTests(unittest.TestCase):
                 "scanned_run_count": 1,
                 "provider_count": 1,
                 "providers.0.provider": "deployment_lookup",
-                "providers.0.last_status": "skipped",
+                "providers.0.last_status": "success",
             },
         )
 
@@ -1620,7 +1622,9 @@ class OpsGraphAuthRouteTests(unittest.TestCase):
             data,
             expected_fields={
                 "providers.0": "deployment_lookup",
-                "summary.skipped_count": 1,
+                "summary.success_count": 1,
+                "summary.skipped_count": 0,
+                "results.0.execution_mode": "local_fallback",
                 "exit_code": 0,
             },
         )
@@ -1659,7 +1663,8 @@ class OpsGraphAuthRouteTests(unittest.TestCase):
                 "actor_user_id": "user-admin-1",
                 "request_id": "req-runtime-smoke-history-1",
                 "request_payload.providers.0": "deployment_lookup",
-                "response.summary.skipped_count": 1,
+                "response.summary.success_count": 1,
+                "response.results.0.execution_mode": "local_fallback",
             },
         )
 
@@ -1748,7 +1753,7 @@ class OpsGraphAuthRouteTests(unittest.TestCase):
                 "provider_count": 1,
                 "providers.0.provider": "deployment_lookup",
                 "providers.0.run_count": 1,
-                "providers.0.last_status": "skipped",
+                "providers.0.last_status": "success",
             },
         )
 
@@ -2415,7 +2420,7 @@ class OpsGraphAuthRouteTests(unittest.TestCase):
 class OpsGraphPersistentAuthRouteTests(unittest.TestCase):
     def test_persistent_business_routes_reject_header_only_auth_by_default(self) -> None:
         temp_dir, database_url = _create_auth_database_url()
-        self.addCleanup(temp_dir.cleanup)
+        self.addCleanup(cleanup_repo_tempdir, temp_dir)
         with _patched_auth_env():
             service = build_app_service(database_url=database_url)
         self.addCleanup(service.close)
@@ -2434,7 +2439,7 @@ class OpsGraphPersistentAuthRouteTests(unittest.TestCase):
 
     def test_persistent_auth_routes_accept_bootstrap_admin_session(self) -> None:
         temp_dir, database_url = _create_auth_database_url()
-        self.addCleanup(temp_dir.cleanup)
+        self.addCleanup(cleanup_repo_tempdir, temp_dir)
         with _patched_auth_env(
             OPSGRAPH_BOOTSTRAP_ADMIN_EMAIL="bootstrap-admin@example.com",
             OPSGRAPH_BOOTSTRAP_ADMIN_PASSWORD="bootstrap-secret",
@@ -2550,14 +2555,15 @@ def _stub_service():
         run_remote_provider_smoke=lambda command, **kwargs: {
             "providers": list(command.providers) or ["deployment_lookup"],
             "summary": {
-                "success_count": 0,
-                "skipped_count": len(list(command.providers) or ["deployment_lookup"]),
+                "success_count": len(list(command.providers) or ["deployment_lookup"]),
+                "skipped_count": 0,
                 "failed_count": 0,
             },
             "results": [
                 {
                     "provider": provider,
-                    "status": "skipped",
+                    "status": "success",
+                    "execution_mode": "local_fallback",
                     "reason": "REMOTE_PROVIDER_NOT_ACTIVE",
                     "capability": {
                         "requested_mode": "auto",
@@ -2593,14 +2599,15 @@ def _stub_service():
                 "response": {
                     "providers": ["deployment_lookup"],
                     "summary": {
-                        "success_count": 0,
-                        "skipped_count": 1,
+                        "success_count": 1,
+                        "skipped_count": 0,
                         "failed_count": 0,
                     },
                     "results": [
                         {
                             "provider": "deployment_lookup",
-                            "status": "skipped",
+                            "status": "success",
+                            "execution_mode": "local_fallback",
                             "reason": "REMOTE_PROVIDER_NOT_ACTIVE",
                             "capability": {
                                 "requested_mode": "auto",
@@ -2634,15 +2641,15 @@ def _stub_service():
                 {
                     "provider": "deployment_lookup",
                     "run_count": 1,
-                    "success_count": 0,
-                    "skipped_count": 1,
+                    "success_count": 1,
+                    "skipped_count": 0,
                     "failed_count": 0,
-                    "last_status": "skipped",
+                    "last_status": "success",
                     "last_reason": "REMOTE_PROVIDER_NOT_ACTIVE",
                     "last_seen_at": "2026-03-27T09:00:06",
-                    "last_success_at": None,
+                    "last_success_at": "2026-03-27T09:00:06",
                     "last_failure_at": None,
-                    "last_skipped_at": "2026-03-27T09:00:06",
+                    "last_skipped_at": None,
                     "last_diagnostic_run_id": "runtime-smoke-stub-1",
                     "latest_effective_mode": "local",
                     "latest_backend_id": "heuristic-provider",

@@ -194,10 +194,27 @@ def run_remote_provider_smoke(
             "capability": capability_before,
             "request": request_payload,
         }
+    capability_details = capability_before.get("details") if isinstance(capability_before, dict) else {}
+    strict_remote_required = bool(
+        capability_details.get("strict_remote_required")
+        if isinstance(capability_details, dict)
+        else False
+    )
+    if capability_before["effective_mode"] == "local" and not strict_remote_required:
+        return {
+            "provider": provider,
+            "status": "success",
+            "execution_mode": "local_fallback",
+            "reason": str(capability_before.get("fallback_reason") or "LOCAL_FALLBACK_ACTIVE"),
+            "capability": capability_before,
+            "request": request_payload,
+            "response": None,
+            "provenance": None,
+        }
     if capability_before["effective_mode"] != "http":
         return {
             "provider": provider,
-            "status": "skipped",
+            "status": "failed",
             "reason": str(capability_before.get("fallback_reason") or "REMOTE_PROVIDER_NOT_ACTIVE"),
             "capability": capability_before,
             "request": request_payload,
@@ -222,6 +239,7 @@ def run_remote_provider_smoke(
     return {
         "provider": provider,
         "status": "success",
+        "execution_mode": "remote_http",
         "capability": capability_after,
         "request": request_payload,
         "response": response_payload,
@@ -270,10 +288,15 @@ def run_remote_provider_smoke_suite(
     failed = [item for item in results if item["status"] == "failed"]
     skipped = [item for item in results if item["status"] == "skipped"]
     success = [item for item in results if item["status"] == "success"]
+    local_fallback = [
+        item
+        for item in success
+        if str(item.get("execution_mode") or "") == "local_fallback"
+    ]
     exit_code = 0
     if failed:
         exit_code = 1
-    elif require_configured and skipped:
+    elif require_configured and (skipped or local_fallback):
         exit_code = 1
     return {
         "providers": selected_providers,

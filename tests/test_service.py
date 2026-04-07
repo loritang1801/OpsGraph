@@ -3,9 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -50,12 +48,7 @@ from opsgraph_app.sample_payloads import (
 )
 from opsgraph_app.worker import OpsGraphReplayWorker
 from shared_core.agent_platform.sqlalchemy_stores import ReplayRecordRow, WorkflowStateRow
-
-
-def _create_repo_tempdir(prefix: str) -> Path:
-    temp_root = ROOT / ".tmp"
-    temp_root.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix=prefix, dir=temp_root))
+from tests._repo_temp import cleanup_repo_tempdir, create_repo_tempdir
 
 
 class OpsGraphServiceTests(unittest.TestCase):
@@ -1183,7 +1176,7 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertIsNone(health.runtime_summary.replay_worker_alert_level)
 
     def test_get_runtime_capabilities_reports_strict_persistent_auth_defaults(self) -> None:
-        tmp_dir = _create_repo_tempdir("opsgraph-auth-service-")
+        tmp_dir = create_repo_tempdir("opsgraph-auth-service-")
         database_url = f"sqlite+pysqlite:///{(tmp_dir / 'opsgraph.db').resolve().as_posix()}"
 
         with patch.dict(
@@ -1205,7 +1198,7 @@ class OpsGraphServiceTests(unittest.TestCase):
             health = service.get_health_status()
         finally:
             service.close()
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            cleanup_repo_tempdir(tmp_dir)
 
         self.assertIsNotNone(capabilities.auth)
         assert capabilities.auth is not None
@@ -1329,7 +1322,7 @@ class OpsGraphServiceTests(unittest.TestCase):
             self.assertEqual(capabilities.replay_worker_alert_policy.warning_consecutive_failures, 2)
             self.assertEqual(capabilities.replay_worker_alert_policy.critical_consecutive_failures, 4)
 
-    def test_run_remote_provider_smoke_reports_skipped_defaults_without_remote_configuration(self) -> None:
+    def test_run_remote_provider_smoke_reports_local_fallback_defaults_without_remote_configuration(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
 
@@ -1339,17 +1332,16 @@ class OpsGraphServiceTests(unittest.TestCase):
             smoke.providers,
             ["deployment_lookup", "service_registry", "runbook_search", "change_context"],
         )
-        self.assertEqual(smoke.summary.success_count, 0)
-        self.assertEqual(smoke.summary.skipped_count, 4)
+        self.assertEqual(smoke.summary.success_count, 4)
+        self.assertEqual(smoke.summary.skipped_count, 0)
         self.assertEqual(smoke.summary.failed_count, 0)
         self.assertEqual(smoke.exit_code, 0)
         self.assertTrue(str(smoke.diagnostic_run_id).startswith("runtime-smoke-"))
         self.assertIsNotNone(smoke.created_at)
-        self.assertTrue(
-            all(result.status == "skipped" for result in smoke.results)
-        )
+        self.assertTrue(all(result.status == "success" for result in smoke.results))
+        self.assertTrue(all(result.execution_mode == "local_fallback" for result in smoke.results))
 
-    def test_run_remote_provider_smoke_respects_require_configured_for_skipped_provider(self) -> None:
+    def test_run_remote_provider_smoke_respects_require_configured_for_local_fallback_provider(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
 
@@ -1360,12 +1352,13 @@ class OpsGraphServiceTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(smoke.summary.success_count, 0)
-        self.assertEqual(smoke.summary.skipped_count, 1)
+        self.assertEqual(smoke.summary.success_count, 1)
+        self.assertEqual(smoke.summary.skipped_count, 0)
         self.assertEqual(smoke.summary.failed_count, 0)
         self.assertEqual(smoke.exit_code, 1)
         self.assertEqual(smoke.results[0].provider, "deployment_lookup")
-        self.assertEqual(smoke.results[0].status, "skipped")
+        self.assertEqual(smoke.results[0].status, "success")
+        self.assertEqual(smoke.results[0].execution_mode, "local_fallback")
 
     def test_run_remote_provider_smoke_persists_history_with_actor_context(self) -> None:
         service = build_app_service()
@@ -1390,7 +1383,8 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(history[0].actor_role, "product_admin")
         self.assertEqual(history[0].request_id, "req-runtime-smoke-1")
         self.assertEqual(history[0].request_payload["providers"], ["deployment_lookup"])
-        self.assertEqual(history[0].response.summary.skipped_count, 1)
+        self.assertEqual(history[0].response.summary.success_count, 1)
+        self.assertEqual(history[0].response.results[0].execution_mode, "local_fallback")
 
     def test_list_remote_provider_smoke_runs_supports_actor_request_and_provider_filters(self) -> None:
         service = build_app_service()
@@ -3574,7 +3568,7 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(closed.incident_status, "closed")
 
     def test_sqlalchemy_repository_persists_incident_updates_across_service_instances(self) -> None:
-        tmp_dir = _create_repo_tempdir("opsgraph-db-")
+        tmp_dir = create_repo_tempdir("opsgraph-db-")
         database_url = f"sqlite+pysqlite:///{(tmp_dir / 'opsgraph.db').resolve().as_posix()}"
 
         service_one = build_app_service(database_url=database_url)
@@ -3597,4 +3591,4 @@ class OpsGraphServiceTests(unittest.TestCase):
             service_one.close()
             if service_two is not None:
                 service_two.close()
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            cleanup_repo_tempdir(tmp_dir)

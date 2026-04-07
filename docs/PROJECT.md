@@ -72,6 +72,11 @@ OpsGraph/
 ├── replay_reports/                  replay 输出报告
 ├── schemas/remote_provider_contracts/ 远端 provider schema
 ├── scripts/                         本地运行、CI、schema 生成脚本
+│   ├── run_api.py                   标准 API 启动脚本
+│   ├── run_demo_workflow.py         演示 incident workflow
+│   ├── run_remote_provider_smoke.py remote provider smoke
+│   ├── run_replay_report.py         replay 报告
+│   └── run_replay_worker.py         replay worker / supervisor
 ├── shared_core/                     共享运行时与平台代码
 ├── src/opsgraph_app/                产品主代码
 │   ├── app.py
@@ -550,7 +555,7 @@ sequenceDiagram
 
 - Python 3.12+
 - PowerShell 或其他可用终端
-- 如需使用 OpenAI 模型模式，需要额外安装 `openai` 包并配置 API Key
+- 如需使用 OpenAI 模型模式，需要安装 `.[api,ai]` 并配置 API Key
 
 ### 8.2 初始化步骤
 
@@ -565,27 +570,39 @@ python -m venv .venv
 # 3. 安装依赖
 python -m pip install --upgrade pip
 python -m pip install -e .[api]
+python -m pip install -e .[api,ai]  # 如需 OpenAI 路径
 
-# 4. 运行测试
+# 4. 准备本地环境
+Copy-Item .env.example .env
+
+# 5. 运行测试
 python -m unittest discover -s tests -t .
 
-# 5. 生成远端 provider schema
+# 6. 生成远端 provider schema
 python .\scripts\generate_remote_provider_schemas.py
 
-# 6. 运行演示工作流
+# 7. 运行演示工作流
 python .\scripts\run_demo_workflow.py
 
-# 7. 运行 remote provider smoke
-python .\scripts\run_remote_provider_smoke.py
+# 8. 运行 remote provider smoke
+python .\scripts\run_remote_provider_smoke.py --include-write --allow-write
 
-# 8. 运行 replay worker
-python .\scripts\run_replay_worker.py --seed-run
+# 9. 运行 replay worker
+python .\scripts\run_replay_worker.py --seed-run --supervise --iterations 2 --max-idle-polls 1
+
+# 10. 启动 API
+python .\scripts\run_api.py --host 127.0.0.1 --port 8000
 ```
+
+本地脚本默认使用仓库内 `.local/opsgraph.db` 持久化数据库；如需覆盖，可以设置 `OPSGRAPH_DATABASE_URL` 或给脚本显式传入 `--database-url`。
+
+未配置远端 provider 时，`run_remote_provider_smoke.py` 会把本地 fallback 记为 `success` + `local_fallback`；如需把“未接通远端”视为失败，请额外传 `--require-configured`。
 
 ### 8.3 主要脚本说明
 
 | 脚本 | 说明 |
 | --- | --- |
+| `scripts/run_api.py` | 启动 FastAPI API |
 | `scripts/run_demo_workflow.py` | 运行演示 incident workflow |
 | `scripts/run_remote_provider_smoke.py` | 触发 smoke 检查 |
 | `scripts/run_replay_report.py` | 生成 replay 报告 |
@@ -650,11 +667,13 @@ python -m pip install -e .[api]
 
 ### 10.2 生产环境启动
 
-仓库中没有单独的启动脚本文件，应用入口来自 [app.py](D:/project/OpsGraph/src/opsgraph_app/app.py) 中的 `create_app()`。典型启动方式如下：
+仓库提供了标准 API 启动脚本：
 
 ```powershell
-uvicorn opsgraph_app.app:create_app --factory --host 0.0.0.0 --port 8000
+python .\scripts\run_api.py --host 0.0.0.0 --port 8000
 ```
+
+如需覆盖数据库，可附加 `--database-url sqlite+pysqlite:///./.local/opsgraph.db`，或者通过 `OPSGRAPH_DATABASE_URL` 提前注入。
 
 ### 10.3 Docker 部署
 
@@ -681,7 +700,7 @@ CI 主要执行：
 当前 smoke commands 包括：
 
 - `python scripts/run_demo_workflow.py`
-- `python scripts/run_remote_provider_smoke.py`
+- `python scripts/run_remote_provider_smoke.py --include-write --allow-write`
 - `python scripts/run_replay_worker.py --seed-run --supervise --iterations 2 --max-idle-polls 1`
 
 ## 11. 测试说明
@@ -724,10 +743,9 @@ python .\scripts\run_replay_worker.py --seed-run --supervise --iterations 2 --ma
 
 ## 12. 注意事项 & 已知问题
 
-- 默认数据库是内存 SQLite，重启即失去数据。
-- 当前仓库未提供 Alembic、Dockerfile、compose 或 `.env.example`。
-- OpenAI 模式依赖额外安装 `openai` 包，`pyproject.toml` 中未声明对应 optional extra。
-- 远端 provider 是否真正生效取决于环境变量配置；未配置时会回落到本地 heuristic 或 repository-only 行为。
-- `opsgraph-ci.yml` 的 path filters 仍包含 `INTEGRATIONS.md`，但当前仓库根目录未见该文件；这不会直接影响运行，但属于 CI 配置与仓库文档清单不完全一致的问题。
+- 本地脚本默认使用 `.local/opsgraph.db` 做持久化；如果直接在库级 API 上不传 `database_url`，仍会退回内存 SQLite。
+- 当前仓库未提供 Alembic、Dockerfile 或 compose 文件。
+- OpenAI 模式可以通过 `python -m pip install -e .[api,ai]` 启用。
+- 远端 provider 是否真正生效取决于环境变量配置；未配置时会回落到本地 heuristic 或 repository-only 行为，remote smoke 会将这类情况标记为 `success` + `local_fallback`。
 
 文档已生成，共 12 个章节，覆盖 68 个 API 接口，32 张数据表。

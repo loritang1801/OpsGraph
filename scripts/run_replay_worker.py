@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
-from pathlib import Path
+from uuid import uuid4
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+from _local_runtime import ensure_src_on_path, resolve_database_url
+
+ensure_src_on_path()
 
 from opsgraph_app.bootstrap import build_replay_worker
 from opsgraph_app.sample_payloads import replay_run_command
@@ -55,6 +53,7 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Supervisor-only: emit an idle heartbeat every N iterations.",
     )
+    parser.add_argument("--database-url", help="Optional SQLAlchemy database URL.")
     parser.add_argument("--seed-run", action="store_true")
     parser.add_argument("--model-bundle-version", default="opsgraph-v1.2")
     return parser.parse_args()
@@ -63,15 +62,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     worker = build_replay_worker(
+        database_url=resolve_database_url(args.database_url),
         workspace_id=args.workspace_id,
         limit=args.limit,
     )
     try:
         seeded = None
         if args.seed_run:
+            suffix = uuid4().hex[:8]
             seeded = worker.app_service.start_replay_run(
                 replay_run_command(model_bundle_version=args.model_bundle_version),
-                idempotency_key=f"replay-worker-seed-{args.model_bundle_version}",
+                idempotency_key=f"replay-worker-seed-{args.model_bundle_version}-{suffix}",
             )
         max_iterations = None if args.forever else args.iterations
         max_idle_polls = None if args.max_idle_polls <= 0 else args.max_idle_polls

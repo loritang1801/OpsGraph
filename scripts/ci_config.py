@@ -19,7 +19,7 @@ def build_ci_config() -> ProductCiConfig:
         schema_paths=("schemas/remote_provider_contracts",),
         smoke_commands=(
             ("{python}", "scripts/run_demo_workflow.py"),
-            ("{python}", "scripts/run_remote_provider_smoke.py"),
+            ("{python}", "scripts/run_remote_provider_smoke.py", "--include-write", "--allow-write"),
             (
                 "{python}",
                 "scripts/run_replay_worker.py",
@@ -40,7 +40,6 @@ def build_ci_config() -> ProductCiConfig:
             "shared_core/**",
             "tests/**",
             "README.md",
-            "INTEGRATIONS.md",
             "PROMPT_TOOL.md",
         ),
     )

@@ -854,6 +854,7 @@ class RemoteProviderSmokeSummary(OpsGraphModel):
 class RemoteProviderSmokeResult(OpsGraphModel):
     provider: str
     status: Literal["success", "skipped", "failed"]
+    execution_mode: Literal["local_fallback", "remote_http"] | None = None
     reason: str | None = None
     capability: RuntimeCapability
     request: dict[str, Any] = Field(default_factory=dict)

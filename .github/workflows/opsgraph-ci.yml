@@ -13,7 +13,6 @@ on:
       - "shared_core/**"
       - "tests/**"
       - "README.md"
-      - "INTEGRATIONS.md"
       - "PROMPT_TOOL.md"
   pull_request:
     paths:
@@ -25,7 +24,6 @@ on:
       - "shared_core/**"
       - "tests/**"
       - "README.md"
-      - "INTEGRATIONS.md"
       - "PROMPT_TOOL.md"
   workflow_dispatch:
 

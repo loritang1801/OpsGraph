@@ -63,7 +63,7 @@ class OpsGraphRemoteProviderSmokeTests(unittest.TestCase):
         )
         self.assertIn("comms_publish", available_smoke_providers(include_write=True))
 
-    def test_run_remote_provider_smoke_skips_inactive_remote_provider(self) -> None:
+    def test_run_remote_provider_smoke_reports_local_fallback_as_success(self) -> None:
         resolver = _FakeResolver(
             capabilities={
                 "deployment_lookup": [
@@ -85,7 +85,8 @@ class OpsGraphRemoteProviderSmokeTests(unittest.TestCase):
             params={"service_id": "checkout-api", "incident_id": "incident-1", "limit": 2},
         )
 
-        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["execution_mode"], "local_fallback")
         self.assertEqual(result["reason"], "OPSGRAPH_DEPLOYMENT_LOOKUP_HTTP_TEMPLATE_NOT_CONFIGURED")
 
     def test_run_remote_provider_smoke_reports_runtime_fallback_failure(self) -> None:
@@ -163,6 +164,7 @@ class OpsGraphRemoteProviderSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "success")
+        self.assertEqual(result["execution_mode"], "remote_http")
         self.assertEqual(result["response"]["services"][0]["service_id"], "checkout-api")
         self.assertEqual(result["provenance"]["connection_id"], "service-registry-http")
 
@@ -188,5 +190,6 @@ class OpsGraphRemoteProviderSmokeTests(unittest.TestCase):
             require_configured=True,
         )
 
-        self.assertEqual(payload["summary"]["skipped_count"], 1)
+        self.assertEqual(payload["summary"]["success_count"], 1)
+        self.assertEqual(payload["summary"]["skipped_count"], 0)
         self.assertEqual(payload["exit_code"], 1)

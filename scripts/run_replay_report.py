@@ -1,13 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import json
-import sys
-from pathlib import Path
+from _local_runtime import ensure_src_on_path, resolve_database_url
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+ensure_src_on_path()
 
 from opsgraph_app.bootstrap import build_app_service
 from opsgraph_app.sample_payloads import (
@@ -17,8 +14,15 @@ from opsgraph_app.sample_payloads import (
 )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate an OpsGraph replay report against a local database.")
+    parser.add_argument("--database-url", help="Optional SQLAlchemy database URL.")
+    return parser.parse_args()
+
+
 def main() -> None:
-    service = build_app_service()
+    args = parse_args()
+    service = build_app_service(database_url=resolve_database_url(args.database_url))
     try:
         baseline = service.capture_replay_baseline(replay_baseline_capture_command())
         replay = service.start_replay_run(replay_run_command())

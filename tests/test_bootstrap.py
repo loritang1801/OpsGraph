@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -73,6 +74,12 @@ class OpsGraphBootstrapTests(unittest.TestCase):
 
         self.assertEqual(len(heartbeats), 1)
         self.assertEqual(heartbeats[0].status, "idle")
+
+    def test_shared_runtime_defaults_to_vendored_shared_core(self) -> None:
+        with patch.dict("os.environ", {"OPSGRAPH_SHARED_CORE_SOURCE": ""}, clear=False):
+            shared_platform = load_shared_agent_platform()
+
+        self.assertEqual(shared_platform.__name__, "shared_core.agent_platform")
 
 
 if __name__ == "__main__":
