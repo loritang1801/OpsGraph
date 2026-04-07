@@ -75,6 +75,7 @@ class CommsDraftSummary(OpsGraphModel):
     fact_set_version: int
     approval_task_id: str | None = None
     published_message_ref: str | None = None
+    published_at: datetime | None = None
     created_at: datetime
 
 
@@ -485,6 +486,14 @@ class ReplayEvaluationCommand(OpsGraphModel):
     baseline_id: str
 
 
+class ReplaySemanticCheckSummary(OpsGraphModel):
+    check_name: str
+    matched: bool
+    expected_summary: str | None = None
+    actual_summary: str | None = None
+    detail: str
+
+
 class ReplayEvaluationSummary(OpsGraphModel):
     report_id: str
     baseline_id: str
@@ -508,6 +517,28 @@ class ReplayEvaluationSummary(OpsGraphModel):
     latency_regression_total_ms: int = 0
     avg_latency_delta_ms: float | None = None
     max_latency_delta_ms: int | None = None
+    semantic_check_count: int = 0
+    semantic_mismatch_count: int = 0
+    semantic_match_rate: float | None = None
+    service_id_mismatch_count: int = 0
+    incident_status_mismatch_count: int = 0
+    fact_set_version_mismatch_count: int = 0
+    top_hypothesis_expected_count: int = 0
+    top_hypothesis_actual_count: int = 0
+    top_hypothesis_hit_count: int = 0
+    top_hypothesis_hit_rate: float | None = None
+    recommendation_expected_count: int = 0
+    recommendation_actual_count: int = 0
+    recommendation_match_count: int = 0
+    recommendation_match_rate: float | None = None
+    comms_expected_count: int = 0
+    comms_actual_count: int = 0
+    comms_match_count: int = 0
+    comms_match_rate: float | None = None
+    postmortem_present_expected: bool = False
+    postmortem_present_actual: bool = False
+    postmortem_markdown_matched: bool | None = None
+    semantic_checks: list[ReplaySemanticCheckSummary] = Field(default_factory=list)
     mismatches: list[str] = Field(default_factory=list)
     baseline_final_state: str | None = None
     replay_final_state: str | None = None
@@ -602,6 +633,11 @@ class CommsPublishResponse(OpsGraphModel):
     draft_id: str
     status: str
     published_message_ref: str | None = None
+    delivery_state: Literal["accepted", "published", "failed"] | None = None
+    delivery_confirmed: bool = False
+    provider_delivery_status: str | None = None
+    published_at: datetime | None = None
+    delivery_error: dict[str, Any] | None = None
 
 
 class ApprovalDecisionCommand(OpsGraphModel):
@@ -672,11 +708,16 @@ class IncidentResponseCommand(OpsGraphModel):
     signal_ids: list[str] = Field(default_factory=list)
     signal_summaries: list[dict[str, Any]] = Field(default_factory=list)
     current_incident_candidates: list[dict[str, Any]] = Field(default_factory=list)
-    context_bundle_id: str = "context-1"
+    context_bundle_id: str | None = None
+    context_bundle_summary: str | None = None
+    context_missing_sources: list[str] = Field(default_factory=list)
+    context_bundle_refs: list[dict[str, Any]] = Field(default_factory=list)
     current_fact_set_version: int = 1
     service_id: str | None = None
     confirmed_fact_refs: list[dict[str, Any]] = Field(default_factory=list)
     top_hypothesis_refs: list[dict[str, Any]] = Field(default_factory=list)
+    investigation_memory_context: list[dict[str, Any]] = Field(default_factory=list)
+    recommendation_memory_context: list[dict[str, Any]] = Field(default_factory=list)
     target_channels: list[str] = Field(default_factory=lambda: ["internal_slack"])
     organization_id: str = "org-1"
     workspace_id: str = "ws-1"
@@ -691,6 +732,7 @@ class RetrospectiveCommand(OpsGraphModel):
     confirmed_fact_refs: list[dict[str, Any]] = Field(default_factory=list)
     timeline_refs: list[dict[str, Any]] = Field(default_factory=list)
     resolution_summary: str = ""
+    postmortem_memory_context: list[dict[str, Any]] = Field(default_factory=list)
     organization_id: str = "org-1"
     workspace_id: str = "ws-1"
     state_overrides: dict[str, Any] = Field(default_factory=dict)
@@ -721,14 +763,170 @@ class RuntimeCapability(OpsGraphModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class RuntimeAuthSummary(OpsGraphModel):
+    mode: Literal["demo_compatible", "strict"]
+    source: Literal["product_compat", "shared_delegated"] | None = None
+    header_fallback_enabled: bool = False
+    demo_seed_enabled: bool = False
+    bootstrap_admin_configured: bool = False
+    bootstrap_organization_slug: str | None = None
+
+
 class RuntimeCapabilitiesResponse(OpsGraphModel):
     product: Literal["opsgraph"] = "opsgraph"
     model_provider: RuntimeCapability
     tooling: dict[str, RuntimeCapability] = Field(default_factory=dict)
+    auth: RuntimeAuthSummary | None = None
+    runtime_provider_alert: "RuntimeProviderAlertSummary | None" = None
+    remote_provider_smoke_alert: "RemoteProviderSmokeAlertSummary | None" = None
     replay_worker: ReplayWorkerStatusSummary | None = None
     replay_worker_history: list[ReplayWorkerHeartbeatSummary] = Field(default_factory=list)
     replay_worker_alert: ReplayWorkerAlertSummary | None = None
     replay_worker_alert_policy: ReplayWorkerAlertPolicySummary | None = None
+
+
+class ReplayQualitySummary(OpsGraphModel):
+    workspace_id: str
+    incident_id: str | None = None
+    incident_count: int = 0
+    replay_case_count: int = 0
+    replay_case_expected_output_count: int = 0
+    replay_case_expected_output_coverage_rate: float = 0.0
+    baseline_count: int = 0
+    baseline_incident_coverage_count: int = 0
+    baseline_coverage_rate: float = 0.0
+    evaluation_count: int = 0
+    matched_evaluation_count: int = 0
+    mismatched_evaluation_count: int = 0
+    replay_pass_rate: float = 0.0
+    avg_replay_score: float | None = None
+    semantic_evaluation_count: int = 0
+    avg_semantic_match_rate: float | None = None
+    avg_top_hypothesis_hit_rate: float | None = None
+    avg_recommendation_match_rate: float | None = None
+    avg_comms_match_rate: float | None = None
+    latest_report_id: str | None = None
+    latest_report_created_at: datetime | None = None
+
+
+class RuntimeProviderAlertItem(OpsGraphModel):
+    capability_name: str
+    level: Literal["warning", "critical"]
+    requested_mode: str
+    effective_mode: str
+    backend_id: str
+    strict_remote_required: bool = False
+    reason_code: str
+    detail: str
+
+
+class RuntimeProviderAlertSummary(OpsGraphModel):
+    level: Literal["healthy", "warning", "critical"] = "healthy"
+    headline: str
+    detail: str
+    active_alert_count: int = 0
+    alerts: list[RuntimeProviderAlertItem] = Field(default_factory=list)
+
+
+class RemoteProviderSmokeCommand(OpsGraphModel):
+    providers: list[str] = Field(default_factory=list)
+    include_write: bool = False
+    allow_write: bool = False
+    require_configured: bool = False
+    service_id: str = "checkout-api"
+    incident_id: str = "incident-1"
+    limit: int = 3
+    search_query: str = "checkout api"
+    runbook_query: str = "rollback elevated 5xx"
+    draft_id: str = "draft-1"
+    channel_type: str = "internal_slack"
+    title: str = "OpsGraph remote provider smoke"
+    body_markdown: str = "Smoke validation for remote provider delivery."
+    fact_set_version: int = 1
+
+
+class RemoteProviderSmokeSummary(OpsGraphModel):
+    success_count: int
+    skipped_count: int
+    failed_count: int
+
+
+class RemoteProviderSmokeResult(OpsGraphModel):
+    provider: str
+    status: Literal["success", "skipped", "failed"]
+    reason: str | None = None
+    capability: RuntimeCapability
+    request: dict[str, Any] = Field(default_factory=dict)
+    response: dict[str, Any] | None = None
+    provenance: dict[str, Any] | None = None
+
+
+class RemoteProviderSmokeResponse(OpsGraphModel):
+    providers: list[str] = Field(default_factory=list)
+    summary: RemoteProviderSmokeSummary
+    results: list[RemoteProviderSmokeResult] = Field(default_factory=list)
+    exit_code: int
+    diagnostic_run_id: str | None = None
+    created_at: datetime | None = None
+
+
+class RemoteProviderSmokeRunRecord(OpsGraphModel):
+    diagnostic_run_id: str
+    actor_type: str = "system"
+    actor_user_id: str | None = None
+    actor_role: str | None = None
+    session_id: str | None = None
+    request_id: str | None = None
+    request_payload: dict[str, Any] = Field(default_factory=dict)
+    response: RemoteProviderSmokeResponse
+    created_at: datetime
+
+
+class RemoteProviderSmokeProviderSummary(OpsGraphModel):
+    provider: str
+    run_count: int = 0
+    success_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    consecutive_failure_count: int = 0
+    consecutive_non_success_count: int = 0
+    last_status: Literal["success", "skipped", "failed"] | None = None
+    last_reason: str | None = None
+    last_seen_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    last_skipped_at: datetime | None = None
+    last_diagnostic_run_id: str | None = None
+    latest_effective_mode: str | None = None
+    latest_backend_id: str | None = None
+    latest_strict_remote_required: bool = False
+
+
+class RemoteProviderSmokeHistorySummary(OpsGraphModel):
+    scanned_run_count: int = 0
+    provider_count: int = 0
+    providers: list[RemoteProviderSmokeProviderSummary] = Field(default_factory=list)
+
+
+class RemoteProviderSmokeAlertItem(OpsGraphModel):
+    provider: str
+    level: Literal["warning", "critical"]
+    reason_code: str
+    detail: str
+    last_status: Literal["success", "skipped", "failed"] | None = None
+    last_reason: str | None = None
+    last_seen_at: datetime | None = None
+    last_diagnostic_run_id: str | None = None
+    consecutive_failure_count: int = 0
+    consecutive_non_success_count: int = 0
+
+
+class RemoteProviderSmokeAlertSummary(OpsGraphModel):
+    level: Literal["healthy", "warning", "critical"] = "healthy"
+    headline: str
+    detail: str
+    active_alert_count: int = 0
+    alerts: list[RemoteProviderSmokeAlertItem] = Field(default_factory=list)
 
 
 class HealthRuntimeSummary(OpsGraphModel):
@@ -737,6 +935,15 @@ class HealthRuntimeSummary(OpsGraphModel):
     tooling_profile: Literal["product-runtime"] = "product-runtime"
     tooling_modes: dict[str, str] = Field(default_factory=dict)
     tooling_backends: dict[str, str] = Field(default_factory=dict)
+    auth_mode: Literal["demo_compatible", "strict"] | None = None
+    auth_source: Literal["product_compat", "shared_delegated"] | None = None
+    auth_header_fallback_enabled: bool = False
+    auth_demo_seed_enabled: bool = False
+    auth_bootstrap_admin_configured: bool = False
+    runtime_provider_alert_level: Literal["healthy", "warning", "critical"] | None = None
+    runtime_provider_alert_count: int = 0
+    remote_provider_smoke_alert_level: Literal["healthy", "warning", "critical"] | None = None
+    remote_provider_smoke_alert_count: int = 0
     replay_worker_status: str | None = None
     replay_worker_last_seen_at: datetime | None = None
     replay_worker_workspace_id: str | None = None

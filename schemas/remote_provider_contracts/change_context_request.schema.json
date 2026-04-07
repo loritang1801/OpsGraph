@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-opsgraph-schema-version": "2026-03-27.1",
+  "additionalProperties": false,
+  "properties": {
+    "service_id": {
+      "title": "Service Id",
+      "type": "string"
+    },
+    "incident_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Incident Id"
+    },
+    "limit": {
+      "default": 3,
+      "title": "Limit",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "service_id"
+  ],
+  "title": "CanonicalChangeContextRequest",
+  "type": "object"
+}

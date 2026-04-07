@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-opsgraph-schema-version": "2026-03-27.1",
+  "additionalProperties": false,
+  "properties": {
+    "published_message_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Published Message Ref"
+    },
+    "delivery_state": {
+      "enum": [
+        "accepted",
+        "published",
+        "failed"
+      ],
+      "title": "Delivery State",
+      "type": "string"
+    },
+    "delivery_confirmed": {
+      "default": false,
+      "title": "Delivery Confirmed",
+      "type": "boolean"
+    },
+    "provider_delivery_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Delivery Status"
+    },
+    "delivery_error": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Delivery Error"
+    }
+  },
+  "required": [
+    "delivery_state"
+  ],
+  "title": "CanonicalCommsPublishResponse",
+  "type": "object"
+}

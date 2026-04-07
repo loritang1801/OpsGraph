@@ -1,0 +1,10 @@
+{
+  "incident_id": "incident-1",
+  "draft_id": "draft-1",
+  "channel_type": "internal_slack",
+  "title": "Checkout API incident update",
+  "body_markdown": "We are investigating elevated 5xx errors in checkout-api.",
+  "fact_set_version": 2,
+  "url_template": "https://comms.example.test/incidents/{incident_id}/drafts/{draft_id}/publish?channel={channel_type}&fact_set_version={fact_set_version}",
+  "expected_url": "https://comms.example.test/incidents/incident-1/drafts/draft-1/publish?channel=internal_slack&fact_set_version=2"
+}

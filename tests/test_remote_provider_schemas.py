@@ -39,6 +39,10 @@ class OpsGraphRemoteProviderSchemaTests(unittest.TestCase):
             "service_registry_response.schema.json": "service_registry_response.json",
             "runbook_search_request.schema.json": "runbook_search_request.json",
             "runbook_search_response.schema.json": "runbook_search_response.json",
+            "change_context_request.schema.json": "change_context_request.json",
+            "change_context_response.schema.json": "change_context_response.json",
+            "comms_publish_request.schema.json": "comms_publish_request.json",
+            "comms_publish_response.schema.json": "comms_publish_response.json",
         }
 
         for schema_filename, fixture_filename in fixture_map.items():
@@ -50,7 +54,7 @@ class OpsGraphRemoteProviderSchemaTests(unittest.TestCase):
                 if field_name in fixture_payload
             }
             validated = model.model_validate(payload)
-            self.assertEqual(validated.model_dump(mode="json"), payload, schema_filename)
+            self.assertEqual(validated.model_dump(mode="json", exclude_none=True), payload, schema_filename)
 
 
 if __name__ == "__main__":

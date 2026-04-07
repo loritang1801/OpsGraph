@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-opsgraph-schema-version": "2026-03-27.1",
+  "$defs": {
+    "CanonicalChangeRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "change_id": {
+          "title": "Change Id",
+          "type": "string"
+        },
+        "ticket_ref": {
+          "title": "Ticket Ref",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "changed_at": {
+          "title": "Changed At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "change_id",
+        "ticket_ref",
+        "summary",
+        "status",
+        "changed_at"
+      ],
+      "title": "CanonicalChangeRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "changes": {
+      "items": {
+        "$ref": "#/$defs/CanonicalChangeRecord"
+      },
+      "title": "Changes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "changes"
+  ],
+  "title": "CanonicalChangeContextResponse",
+  "type": "object"
+}

@@ -41,6 +41,8 @@ from .api_models import (
     ReplayEvaluationSummary,
     ReplayNodeDiffSummary,
     ReplayNodeSummary,
+    ReplayQualitySummary,
+    ReplaySemanticCheckSummary,
     ReplayQueueProcessResponse,
     ReplayWorkerAlertSummary,
     ReplayWorkerAlertPolicySummary,
@@ -61,6 +63,14 @@ from .api_models import (
     ReplayRunCommand,
     ReplayStatusCommand,
     ReplayRunSummary,
+    RuntimeProviderAlertSummary,
+    RemoteProviderSmokeAlertSummary,
+    RemoteProviderSmokeAlertItem,
+    RemoteProviderSmokeHistorySummary,
+    RemoteProviderSmokeProviderSummary,
+    RemoteProviderSmokeRunRecord,
+    RemoteProviderSmokeCommand,
+    RemoteProviderSmokeResponse,
     RuntimeCapabilitiesResponse,
     RecommendationSummary,
     ResolveIncidentCommand,
@@ -70,8 +80,17 @@ from .api_models import (
 from .repository import OpsGraphRepository
 from .replay_fixtures import seed_incident_response_replay_fixtures
 from .replay_reports import write_replay_report_artifacts
+from .service_runtime_admin import (
+    build_remote_provider_smoke_alert_summary as runtime_admin_build_remote_provider_smoke_alert_summary,
+    build_runtime_provider_alert_summary as runtime_admin_build_runtime_provider_alert_summary,
+    get_health_status as runtime_admin_get_health_status,
+    get_runtime_capabilities as runtime_admin_get_runtime_capabilities,
+    list_remote_provider_smoke_runs as runtime_admin_list_remote_provider_smoke_runs,
+    run_remote_provider_smoke as runtime_admin_run_remote_provider_smoke,
+    runtime_provider_is_remote_active as runtime_admin_runtime_provider_is_remote_active,
+    summarize_remote_provider_smoke_runs as runtime_admin_summarize_remote_provider_smoke_runs,
+)
 from .shared_runtime import load_shared_agent_platform
-from .tool_adapters import describe_opsgraph_product_tool_capabilities
 
 CommandT = TypeVar("CommandT", IncidentResponseCommand, RetrospectiveCommand)
 
@@ -89,6 +108,8 @@ class OpsGraphAppService:
         replay_fixture_store=None,
         replay_worker_alert_warning_consecutive_failures: int = 1,
         replay_worker_alert_critical_consecutive_failures: int = 3,
+        remote_provider_smoke_alert_warning_consecutive_failures: int = 1,
+        remote_provider_smoke_alert_critical_consecutive_failures: int = 3,
     ) -> None:
         (
             self.replay_worker_alert_warning_consecutive_failures,
@@ -96,6 +117,13 @@ class OpsGraphAppService:
         ) = self._validate_replay_worker_alert_thresholds(
             warning_consecutive_failures=replay_worker_alert_warning_consecutive_failures,
             critical_consecutive_failures=replay_worker_alert_critical_consecutive_failures,
+        )
+        (
+            self.remote_provider_smoke_alert_warning_consecutive_failures,
+            self.remote_provider_smoke_alert_critical_consecutive_failures,
+        ) = self._validate_remote_provider_smoke_alert_thresholds(
+            warning_consecutive_failures=remote_provider_smoke_alert_warning_consecutive_failures,
+            critical_consecutive_failures=remote_provider_smoke_alert_critical_consecutive_failures,
         )
         self.workflow_api_service = workflow_api_service
         self.repository = repository
@@ -116,6 +144,18 @@ class OpsGraphAppService:
             raise ValueError("INVALID_REPLAY_WORKER_ALERT_WARNING_THRESHOLD")
         if critical_consecutive_failures < warning_consecutive_failures:
             raise ValueError("INVALID_REPLAY_WORKER_ALERT_CRITICAL_THRESHOLD")
+        return warning_consecutive_failures, critical_consecutive_failures
+
+    @staticmethod
+    def _validate_remote_provider_smoke_alert_thresholds(
+        *,
+        warning_consecutive_failures: int,
+        critical_consecutive_failures: int,
+    ) -> tuple[int, int]:
+        if warning_consecutive_failures < 1:
+            raise ValueError("INVALID_REMOTE_PROVIDER_SMOKE_ALERT_WARNING_THRESHOLD")
+        if critical_consecutive_failures < warning_consecutive_failures:
+            raise ValueError("INVALID_REMOTE_PROVIDER_SMOKE_ALERT_CRITICAL_THRESHOLD")
         return warning_consecutive_failures, critical_consecutive_failures
 
     @staticmethod
@@ -318,105 +358,334 @@ class OpsGraphAppService:
             response_payload=response_payload,
         )
 
+    @staticmethod
+    def _safe_match_rate(matched_count: int, expected_count: int) -> float | None:
+        if expected_count <= 0:
+            return None
+        return round(matched_count / expected_count, 4)
+
+    @staticmethod
+    def _normalize_semantic_text(value: object) -> str:
+        return " ".join(str(value or "").split()).strip().casefold()
+
+    @classmethod
+    def _normalize_semantic_list(cls, values: list[str]) -> list[str]:
+        return [item for item in (cls._normalize_semantic_text(value) for value in values) if item]
+
+    @staticmethod
+    def _truncate_semantic_value(value: str, *, limit: int = 80) -> str:
+        normalized = " ".join(value.split()).strip()
+        if len(normalized) <= limit:
+            return normalized
+        return f"{normalized[: limit - 3]}..."
+
+    @classmethod
+    def _summarize_semantic_values(cls, values: list[str], *, item_limit: int = 3) -> str:
+        if not values:
+            return "none"
+        trimmed = [cls._truncate_semantic_value(value) for value in values[:item_limit]]
+        if len(values) > item_limit:
+            trimmed.append(f"+{len(values) - item_limit} more")
+        return " | ".join(trimmed)
+
+    @staticmethod
+    def _state_payloads(state: dict[str, Any], key: str) -> list[dict[str, Any]]:
+        payload = state.get(key)
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    @classmethod
+    def _state_hypothesis_titles(cls, state: dict[str, Any]) -> list[str]:
+        payloads = sorted(
+            cls._state_payloads(state, "hypothesis_payloads"),
+            key=lambda item: (
+                int(item.get("rank") or 0),
+                str(item.get("title") or ""),
+            ),
+        )
+        return [
+            str(item.get("title")).strip()
+            for item in payloads
+            if str(item.get("title") or "").strip()
+        ]
+
+    @classmethod
+    def _state_recommendation_titles(cls, state: dict[str, Any]) -> list[str]:
+        payloads = cls._state_payloads(state, "recommendation_payloads")
+        return [
+            str(item.get("title")).strip()
+            for item in payloads
+            if str(item.get("title") or "").strip()
+        ]
+
+    @classmethod
+    def _state_comms_fingerprints(cls, state: dict[str, Any]) -> list[str]:
+        payloads = cls._state_payloads(state, "comms_payloads")
+        fingerprints: list[str] = []
+        for item in payloads:
+            channel_type = str(item.get("channel_type") or "unknown").strip()
+            fact_set_version = int(item.get("fact_set_version") or 0)
+            body_markdown = cls._truncate_semantic_value(str(item.get("body_markdown") or ""), limit=60)
+            fingerprints.append(f"{channel_type}@v{fact_set_version}: {body_markdown}")
+        return fingerprints
+
+    @staticmethod
+    def _average_or_none(values: list[float | None]) -> float | None:
+        normalized = [value for value in values if value is not None]
+        if not normalized:
+            return None
+        return round(sum(normalized) / len(normalized), 4)
+
+    @classmethod
+    def _build_replay_semantic_metrics(
+        cls,
+        *,
+        baseline_state: dict[str, Any],
+        replay_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        checks: list[ReplaySemanticCheckSummary] = []
+        mismatch_messages: list[str] = []
+
+        def add_check(
+            *,
+            check_name: str,
+            matched: bool,
+            expected_summary: str | None,
+            actual_summary: str | None,
+            detail: str,
+        ) -> None:
+            checks.append(
+                ReplaySemanticCheckSummary(
+                    check_name=check_name,
+                    matched=matched,
+                    expected_summary=expected_summary,
+                    actual_summary=actual_summary,
+                    detail=detail,
+                )
+            )
+            if not matched:
+                mismatch_messages.append(
+                    f"semantic {check_name} mismatch: expected {expected_summary or 'none'}, got {actual_summary or 'none'}"
+                )
+
+        baseline_service_id = str(baseline_state.get("service_id") or "").strip()
+        replay_service_id = str(replay_state.get("service_id") or "").strip()
+        add_check(
+            check_name="service_id",
+            matched=baseline_service_id == replay_service_id,
+            expected_summary=baseline_service_id or "none",
+            actual_summary=replay_service_id or "none",
+            detail="Service identifier should remain stable across baseline and replay.",
+        )
+
+        baseline_incident_status = str(baseline_state.get("incident_status") or "").strip()
+        replay_incident_status = str(replay_state.get("incident_status") or "").strip()
+        add_check(
+            check_name="incident_status",
+            matched=baseline_incident_status == replay_incident_status,
+            expected_summary=baseline_incident_status or "none",
+            actual_summary=replay_incident_status or "none",
+            detail="Incident status should resolve to the same value.",
+        )
+
+        baseline_fact_set_version = int(baseline_state.get("current_fact_set_version") or 0)
+        replay_fact_set_version = int(replay_state.get("current_fact_set_version") or 0)
+        add_check(
+            check_name="fact_set_version",
+            matched=baseline_fact_set_version == replay_fact_set_version,
+            expected_summary=str(baseline_fact_set_version),
+            actual_summary=str(replay_fact_set_version),
+            detail="Fact-set version should remain stable for the same replay seed.",
+        )
+
+        baseline_hypothesis_titles = cls._state_hypothesis_titles(baseline_state)
+        replay_hypothesis_titles = cls._state_hypothesis_titles(replay_state)
+        expected_top_hypotheses = cls._normalize_semantic_list(baseline_hypothesis_titles[:3])
+        actual_top_hypotheses = cls._normalize_semantic_list(replay_hypothesis_titles[:3])
+        top_hypothesis_hit_count = sum(
+            1 for title in expected_top_hypotheses if title in set(actual_top_hypotheses)
+        )
+        top_hypothesis_hit_rate = cls._safe_match_rate(
+            top_hypothesis_hit_count,
+            len(expected_top_hypotheses),
+        )
+        add_check(
+            check_name="top_hypotheses",
+            matched=top_hypothesis_hit_count == len(expected_top_hypotheses),
+            expected_summary=cls._summarize_semantic_values(baseline_hypothesis_titles[:3]),
+            actual_summary=cls._summarize_semantic_values(replay_hypothesis_titles[:3]),
+            detail=(
+                f"Top-hypothesis overlap {top_hypothesis_hit_count}/{len(expected_top_hypotheses)}."
+            ),
+        )
+
+        baseline_recommendations = cls._state_recommendation_titles(baseline_state)
+        replay_recommendations = cls._state_recommendation_titles(replay_state)
+        normalized_baseline_recommendations = cls._normalize_semantic_list(baseline_recommendations)
+        normalized_replay_recommendations = cls._normalize_semantic_list(replay_recommendations)
+        recommendation_match_count = sum(
+            1 for title in normalized_baseline_recommendations if title in set(normalized_replay_recommendations)
+        )
+        recommendation_match_rate = cls._safe_match_rate(
+            recommendation_match_count,
+            len(normalized_baseline_recommendations),
+        )
+        add_check(
+            check_name="recommendations",
+            matched=recommendation_match_count == len(normalized_baseline_recommendations),
+            expected_summary=cls._summarize_semantic_values(baseline_recommendations),
+            actual_summary=cls._summarize_semantic_values(replay_recommendations),
+            detail=(
+                f"Recommendation title overlap {recommendation_match_count}/{len(normalized_baseline_recommendations)}."
+            ),
+        )
+
+        baseline_comms = cls._state_comms_fingerprints(baseline_state)
+        replay_comms = cls._state_comms_fingerprints(replay_state)
+        normalized_baseline_comms = cls._normalize_semantic_list(baseline_comms)
+        normalized_replay_comms = cls._normalize_semantic_list(replay_comms)
+        comms_match_count = sum(
+            1 for fingerprint in normalized_baseline_comms if fingerprint in set(normalized_replay_comms)
+        )
+        comms_match_rate = cls._safe_match_rate(comms_match_count, len(normalized_baseline_comms))
+        add_check(
+            check_name="comms_drafts",
+            matched=comms_match_count == len(normalized_baseline_comms),
+            expected_summary=cls._summarize_semantic_values(baseline_comms),
+            actual_summary=cls._summarize_semantic_values(replay_comms),
+            detail=f"Communication draft overlap {comms_match_count}/{len(normalized_baseline_comms)}.",
+        )
+
+        baseline_postmortem_markdown = cls._normalize_semantic_text(baseline_state.get("postmortem_markdown"))
+        replay_postmortem_markdown = cls._normalize_semantic_text(replay_state.get("postmortem_markdown"))
+        postmortem_present_expected = bool(baseline_postmortem_markdown)
+        postmortem_present_actual = bool(replay_postmortem_markdown)
+        postmortem_markdown_matched: bool | None = None
+        if postmortem_present_expected or postmortem_present_actual:
+            postmortem_markdown_matched = baseline_postmortem_markdown == replay_postmortem_markdown
+            add_check(
+                check_name="postmortem_markdown",
+                matched=bool(postmortem_markdown_matched),
+                expected_summary=cls._truncate_semantic_value(str(baseline_state.get("postmortem_markdown") or ""), limit=100)
+                or "none",
+                actual_summary=cls._truncate_semantic_value(str(replay_state.get("postmortem_markdown") or ""), limit=100)
+                or "none",
+                detail="Postmortem markdown should remain stable when retrospective output is replayed.",
+            )
+
+        semantic_check_count = len(checks)
+        semantic_mismatch_count = sum(1 for item in checks if not item.matched)
+        semantic_match_rate = cls._safe_match_rate(
+            semantic_check_count - semantic_mismatch_count,
+            semantic_check_count,
+        )
+        return {
+            "semantic_check_count": semantic_check_count,
+            "semantic_mismatch_count": semantic_mismatch_count,
+            "semantic_match_rate": semantic_match_rate,
+            "service_id_mismatch_count": int(baseline_service_id != replay_service_id),
+            "incident_status_mismatch_count": int(baseline_incident_status != replay_incident_status),
+            "fact_set_version_mismatch_count": int(baseline_fact_set_version != replay_fact_set_version),
+            "top_hypothesis_expected_count": len(expected_top_hypotheses),
+            "top_hypothesis_actual_count": len(actual_top_hypotheses),
+            "top_hypothesis_hit_count": top_hypothesis_hit_count,
+            "top_hypothesis_hit_rate": top_hypothesis_hit_rate,
+            "recommendation_expected_count": len(normalized_baseline_recommendations),
+            "recommendation_actual_count": len(normalized_replay_recommendations),
+            "recommendation_match_count": recommendation_match_count,
+            "recommendation_match_rate": recommendation_match_rate,
+            "comms_expected_count": len(normalized_baseline_comms),
+            "comms_actual_count": len(normalized_replay_comms),
+            "comms_match_count": comms_match_count,
+            "comms_match_rate": comms_match_rate,
+            "postmortem_present_expected": postmortem_present_expected,
+            "postmortem_present_actual": postmortem_present_actual,
+            "postmortem_markdown_matched": postmortem_markdown_matched,
+            "semantic_checks": checks,
+            "semantic_mismatch_messages": mismatch_messages,
+        }
+
     def list_workflows(self):
         return self.workflow_api_service.list_workflows()
 
+    @staticmethod
+    def _runtime_provider_is_remote_active(effective_mode: str | None) -> bool:
+        return runtime_admin_runtime_provider_is_remote_active(effective_mode)
+
+    @classmethod
+    def _build_runtime_provider_alert_summary(
+        cls,
+        *,
+        model_provider: dict[str, Any],
+        tooling: dict[str, dict[str, Any]],
+    ) -> RuntimeProviderAlertSummary:
+        return runtime_admin_build_runtime_provider_alert_summary(
+            model_provider=model_provider,
+            tooling=tooling,
+        )
+
+    def _build_remote_provider_smoke_alert_summary(
+        self,
+        *,
+        smoke_summary: RemoteProviderSmokeHistorySummary,
+    ) -> RemoteProviderSmokeAlertSummary:
+        return runtime_admin_build_remote_provider_smoke_alert_summary(
+            self,
+            smoke_summary=smoke_summary,
+        )
+
     def get_runtime_capabilities(self) -> RuntimeCapabilitiesResponse:
-        model_gateway = getattr(self.workflow_api_service.execution_service, "model_gateway", None)
-        tool_executor = getattr(self.workflow_api_service.execution_service, "tool_executor", None)
-        replay_worker_status = self.repository.get_replay_worker_status()
-        replay_worker_history = self.repository.list_replay_worker_history(limit=5)
-        replay_worker_workspace_id = (
-            replay_worker_status.workspace_id
-            if replay_worker_status is not None
-            else (replay_worker_history[0].workspace_id if replay_worker_history else None)
+        return runtime_admin_get_runtime_capabilities(self)
+
+    def run_remote_provider_smoke(
+        self,
+        command: RemoteProviderSmokeCommand | dict[str, Any],
+        *,
+        auth_context=None,
+        request_id: str | None = None,
+    ) -> RemoteProviderSmokeResponse:
+        return runtime_admin_run_remote_provider_smoke(
+            self,
+            command,
+            auth_context=auth_context,
+            request_id=request_id,
         )
-        replay_worker_policy = self._resolve_replay_worker_alert_policy(replay_worker_workspace_id)
-        replay_worker_alert = self._build_replay_worker_alert(
-            current=replay_worker_status,
-            latest_failure=self._latest_replay_worker_failure(replay_worker_history),
-            policy=replay_worker_policy,
+
+    def list_remote_provider_smoke_runs(
+        self,
+        *,
+        limit: int = 10,
+        actor_user_id: str | None = None,
+        request_id: str | None = None,
+        provider: str | None = None,
+    ) -> list[RemoteProviderSmokeRunRecord]:
+        return runtime_admin_list_remote_provider_smoke_runs(
+            self,
+            limit=limit,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
+            provider=provider,
         )
-        model_provider = (
-            model_gateway.describe_capability()
-            if model_gateway is not None and hasattr(model_gateway, "describe_capability")
-            else {
-                "requested_mode": "unknown",
-                "effective_mode": "unknown",
-                "backend_id": "unknown",
-                "fallback_reason": None,
-                "details": {},
-            }
-        )
-        return RuntimeCapabilitiesResponse.model_validate(
-            {
-                "product": "opsgraph",
-                "model_provider": model_provider,
-                "tooling": describe_opsgraph_product_tool_capabilities(tool_executor),
-                "replay_worker": (
-                    replay_worker_status.model_dump(mode="json")
-                    if replay_worker_status is not None
-                    else None
-                ),
-                "replay_worker_history": [
-                    item.model_dump(mode="json") for item in replay_worker_history
-                ],
-                "replay_worker_alert": (
-                    replay_worker_alert.model_dump(mode="json")
-                    if replay_worker_alert is not None
-                    else None
-                ),
-                "replay_worker_alert_policy": replay_worker_policy.model_dump(mode="json"),
-            }
+
+    def summarize_remote_provider_smoke_runs(
+        self,
+        *,
+        limit: int = 50,
+        actor_user_id: str | None = None,
+        request_id: str | None = None,
+        provider: str | None = None,
+    ) -> RemoteProviderSmokeHistorySummary:
+        return runtime_admin_summarize_remote_provider_smoke_runs(
+            self,
+            limit=limit,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
+            provider=provider,
         )
 
     def get_health_status(self) -> HealthResponse:
-        capabilities = self.get_runtime_capabilities()
-        return HealthResponse(
-            status="ok",
-            product="opsgraph",
-            runtime_summary=HealthRuntimeSummary(
-                model_provider_mode=capabilities.model_provider.effective_mode,
-                model_backend_id=capabilities.model_provider.backend_id,
-                tooling_modes={
-                    capability_name: capability.effective_mode
-                    for capability_name, capability in capabilities.tooling.items()
-                },
-                tooling_backends={
-                    capability_name: capability.backend_id
-                    for capability_name, capability in capabilities.tooling.items()
-                },
-                replay_worker_status=(
-                    capabilities.replay_worker.status
-                    if capabilities.replay_worker is not None
-                    else None
-                ),
-                replay_worker_last_seen_at=(
-                    capabilities.replay_worker.last_seen_at
-                    if capabilities.replay_worker is not None
-                    else None
-                ),
-                replay_worker_workspace_id=(
-                    capabilities.replay_worker.workspace_id
-                    if capabilities.replay_worker is not None
-                    else None
-                ),
-                replay_worker_remaining_queued_count=(
-                    capabilities.replay_worker.remaining_queued_count
-                    if capabilities.replay_worker is not None
-                    else None
-                ),
-                replay_worker_alert_level=(
-                    capabilities.replay_worker_alert.level
-                    if capabilities.replay_worker_alert is not None
-                    and (
-                        capabilities.replay_worker is not None
-                        or bool(capabilities.replay_worker_history)
-                    )
-                    else None
-                ),
-            ),
-        )
+        return runtime_admin_get_health_status(self)
 
     def get_replay_worker_status(
         self,
@@ -1162,16 +1431,34 @@ class OpsGraphAppService:
                 },
             )
         for published_draft in response.published_drafts:
+            draft_node_name = (
+                "comms_published_from_approval"
+                if published_draft.status == "published"
+                else (
+                    "comms_delivery_accepted_from_approval"
+                    if published_draft.status == "accepted"
+                    else "comms_publish_failed_from_approval"
+                )
+            )
             self._emit_incident_event(
                 incident_id=approval_task.incident_id,
                 event_name="opsgraph.comms.updated",
                 aggregate_type="comms_draft",
                 aggregate_id=published_draft.draft_id,
-                node_name="comms_published_from_approval",
+                node_name=draft_node_name,
                 payload={
                     "draft_id": published_draft.draft_id,
                     "comms_status": published_draft.status,
                     "published_message_ref": published_draft.published_message_ref,
+                    "delivery_state": published_draft.delivery_state,
+                    "delivery_confirmed": published_draft.delivery_confirmed,
+                    "provider_delivery_status": published_draft.provider_delivery_status,
+                    "published_at": (
+                        published_draft.published_at.isoformat()
+                        if published_draft.published_at is not None
+                        else None
+                    ),
+                    "delivery_error": published_draft.delivery_error,
                     "approval_task_id": approval_task.approval_task_id,
                 },
             )
@@ -1468,16 +1755,26 @@ class OpsGraphAppService:
             actor_context=self._build_audit_context(auth_context, request_id=request_id),
             idempotency_key=idempotency_key,
         )
+        node_name = (
+            "comms_published"
+            if response.status == "published"
+            else ("comms_delivery_accepted" if response.status == "accepted" else "comms_publish_failed")
+        )
         self._emit_incident_event(
             incident_id=incident_id,
             event_name="opsgraph.comms.updated",
             aggregate_type="comms_draft",
             aggregate_id=draft_id,
-            node_name="comms_published",
+            node_name=node_name,
             payload={
                 "draft_id": draft_id,
                 "comms_status": response.status,
                 "published_message_ref": response.published_message_ref,
+                "delivery_state": response.delivery_state,
+                "delivery_confirmed": response.delivery_confirmed,
+                "provider_delivery_status": response.provider_delivery_status,
+                "published_at": response.published_at.isoformat() if response.published_at is not None else None,
+                "delivery_error": response.delivery_error,
             },
         )
         self._store_idempotent_response(
@@ -1723,6 +2020,69 @@ class OpsGraphAppService:
             replay_case_id,
         )
 
+    def get_replay_quality_summary(
+        self,
+        workspace_id: str,
+        incident_id: str | None = None,
+    ) -> ReplayQualitySummary:
+        incidents = self.list_incidents(workspace_id)
+        if incident_id is not None:
+            incidents = [item for item in incidents if item.incident_id == incident_id]
+        replay_cases = self.list_replay_cases(workspace_id, incident_id)
+        replay_case_expected_output_count = sum(
+            1
+            for item in replay_cases
+            if self.get_replay_case(item.replay_case_id).expected_output is not None
+        )
+        baselines = self.list_replay_baselines(workspace_id, incident_id)
+        evaluations = self.list_replay_evaluations(workspace_id, incident_id)
+        matched_evaluation_count = sum(1 for item in evaluations if item.status == "matched")
+        semantic_evaluations = [item for item in evaluations if item.semantic_check_count > 0]
+        latest_evaluation = evaluations[0] if evaluations else None
+        return ReplayQualitySummary(
+            workspace_id=workspace_id,
+            incident_id=incident_id,
+            incident_count=len(incidents),
+            replay_case_count=len(replay_cases),
+            replay_case_expected_output_count=replay_case_expected_output_count,
+            replay_case_expected_output_coverage_rate=round(
+                replay_case_expected_output_count / len(replay_cases),
+                4,
+            )
+            if replay_cases
+            else 0.0,
+            baseline_count=len(baselines),
+            baseline_incident_coverage_count=len({item.incident_id for item in baselines}),
+            baseline_coverage_rate=round(
+                len({item.incident_id for item in baselines}) / len(incidents),
+                4,
+            )
+            if incidents
+            else 0.0,
+            evaluation_count=len(evaluations),
+            matched_evaluation_count=matched_evaluation_count,
+            mismatched_evaluation_count=(len(evaluations) - matched_evaluation_count),
+            replay_pass_rate=round(matched_evaluation_count / len(evaluations), 4) if evaluations else 0.0,
+            avg_replay_score=self._average_or_none([item.score for item in evaluations]),
+            semantic_evaluation_count=len(semantic_evaluations),
+            avg_semantic_match_rate=self._average_or_none(
+                [item.semantic_match_rate for item in semantic_evaluations]
+            ),
+            avg_top_hypothesis_hit_rate=self._average_or_none(
+                [item.top_hypothesis_hit_rate for item in semantic_evaluations]
+            ),
+            avg_recommendation_match_rate=self._average_or_none(
+                [item.recommendation_match_rate for item in semantic_evaluations]
+            ),
+            avg_comms_match_rate=self._average_or_none(
+                [item.comms_match_rate for item in semantic_evaluations]
+            ),
+            latest_report_id=(latest_evaluation.report_id if latest_evaluation is not None else None),
+            latest_report_created_at=(
+                latest_evaluation.created_at if latest_evaluation is not None else None
+            ),
+        )
+
     def update_replay_status(
         self,
         replay_run_id: str,
@@ -1915,6 +2275,7 @@ class OpsGraphAppService:
         baseline = self.repository.get_replay_baseline(command.baseline_id)
         if replay.workflow_run_id is None:
             raise ValueError("REPLAY_RUN_NOT_EXECUTED")
+        baseline_state = self.get_workflow_state(baseline.workflow_run_id)
         replay_state = self.get_workflow_state(replay.workflow_run_id)
         replay_records = self.runtime_stores.replay_store.list_for_run(replay.workflow_run_id)
         replay_nodes = [
@@ -2005,8 +2366,18 @@ class OpsGraphAppService:
                     mismatch_reasons=node_mismatches,
                 )
             )
+        semantic_metrics = self._build_replay_semantic_metrics(
+            baseline_state=baseline_state.raw_state,
+            replay_state=replay_state.raw_state,
+        )
+        mismatches.extend(semantic_metrics["semantic_mismatch_messages"])
         status = "matched" if not mismatches else "mismatched"
-        max_checks = max(1, 2 + max(len(baseline.node_summaries), len(replay_nodes)) * 3)
+        max_checks = max(
+            1,
+            2
+            + max(len(baseline.node_summaries), len(replay_nodes)) * 3
+            + int(semantic_metrics["semantic_check_count"]),
+        )
         score = max(0.0, 1.0 - (len(mismatches) / max_checks))
         evaluation = self.repository.record_replay_evaluation(
             baseline_id=baseline.baseline_id,
@@ -2021,11 +2392,20 @@ class OpsGraphAppService:
             replay_checkpoint_seq=replay_state.checkpoint_seq,
             node_diffs=node_diffs,
         )
+        evaluation = evaluation.model_copy(
+            update={
+                key: value
+                for key, value in semantic_metrics.items()
+                if key != "semantic_mismatch_messages"
+            }
+        )
         artifact_path = write_replay_report_artifacts(
             report_id=evaluation.report_id,
             payload={
                 "baseline": baseline.model_dump(mode="json"),
+                "baseline_workflow_state": baseline_state.model_dump(mode="json"),
                 "replay": replay.model_dump(mode="json"),
+                "replay_workflow_state": replay_state.model_dump(mode="json"),
                 "report": evaluation.model_dump(mode="json"),
             },
         )
@@ -2101,6 +2481,7 @@ class OpsGraphAppService:
 
     def respond_to_incident(self, command: IncidentResponseCommand | dict[str, Any]) -> OpsGraphRunResponse:
         command = self._coerce_command(command, IncidentResponseCommand)
+        seed = self.repository.get_incident_execution_seed(command.incident_id)
         response, run_result = self._run_registered_workflow(
             workflow_name="opsgraph_incident_response",
             workflow_run_id=command.workflow_run_id,
@@ -2110,11 +2491,23 @@ class OpsGraphAppService:
                 "signal_ids": command.signal_ids,
                 "signal_summaries": command.signal_summaries,
                 "current_incident_candidates": command.current_incident_candidates,
-                "context_bundle_id": command.context_bundle_id,
+                "context_bundle_id": command.context_bundle_id or seed.get("context_bundle_id"),
+                "context_missing_sources": (
+                    command.context_missing_sources
+                    or list(seed.get("context_missing_sources", []))
+                ),
                 "current_fact_set_version": command.current_fact_set_version,
                 "service_id": command.service_id,
                 "confirmed_fact_refs": command.confirmed_fact_refs,
                 "top_hypothesis_refs": command.top_hypothesis_refs,
+                "investigation_memory_context": (
+                    command.investigation_memory_context
+                    or list(seed.get("investigation_memory_context", []))
+                ),
+                "recommendation_memory_context": (
+                    command.recommendation_memory_context
+                    or list(seed.get("recommendation_memory_context", []))
+                ),
                 "target_channels": command.target_channels,
                 "organization_id": command.organization_id,
                 "workspace_id": command.workspace_id,
@@ -2177,6 +2570,10 @@ class OpsGraphAppService:
                 "confirmed_fact_refs": command.confirmed_fact_refs,
                 "timeline_refs": command.timeline_refs,
                 "resolution_summary": command.resolution_summary,
+                "postmortem_memory_context": (
+                    command.postmortem_memory_context
+                    or self.repository.get_postmortem_memory_context(command.incident_id)
+                ),
                 "organization_id": command.organization_id,
                 "workspace_id": command.workspace_id,
             },

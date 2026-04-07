@@ -1,0 +1,11 @@
+{
+  "changes": [
+    {
+      "change_id": "CHG-401",
+      "ticket_ref": "OPS-401",
+      "summary": "Checkout API deploy approved in Jira",
+      "status": "implemented",
+      "changed_at": "2026-03-28T12:00:00Z"
+    }
+  ]
+}

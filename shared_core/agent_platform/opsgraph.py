@@ -79,6 +79,9 @@ class IncidentWorkflowState(SharedWorkflowStateEnvelope):
     signal_ids: list[str] = Field(default_factory=list)
     context_bundle_id: str | None = None
     context_missing_sources: list[str] = Field(default_factory=list)
+    investigation_memory_context: list[dict[str, Any]] = Field(default_factory=list)
+    recommendation_memory_context: list[dict[str, Any]] = Field(default_factory=list)
+    postmortem_memory_context: list[dict[str, Any]] = Field(default_factory=list)
     current_fact_set_version: int
     confirmed_fact_ids: list[str] = Field(default_factory=list)
     hypothesis_ids: list[str] = Field(default_factory=list)
@@ -509,7 +512,7 @@ def register_opsgraph(catalog: RuntimeCatalog) -> None:
                 _part("developer_constraints", "Never label a hypothesis as a confirmed fact."),
                 _part("runtime_context", "Incident status and missing source warnings.", ["incident_id", "current_fact_set_version", "context_missing_sources"]),
                 _part("domain_context", "Context bundle, confirmed facts, deploys, and service dependencies.", ["context_bundle_id", "confirmed_fact_refs"]),
-                _part("memory_context", "Recent incident patterns for the same service."),
+                _part("memory_context", "Recent incident patterns for the same service.", ["memory_context"]),
                 _part("tool_manifest", "Read-only incident investigation tools."),
                 _part("output_contract", "Investigator output schema."),
             ],
@@ -519,6 +522,7 @@ def register_opsgraph(catalog: RuntimeCatalog) -> None:
                 _var("current_fact_set_version", "workflow_state"),
                 _var("confirmed_fact_refs", "database"),
                 _var("context_missing_sources", "workflow_state"),
+                _var("memory_context", "memory", required=False),
             ],
             response_schema_ref="opsgraph.investigator.output.v1",
             model_profile_id="reasoning.standard",
@@ -538,7 +542,7 @@ def register_opsgraph(catalog: RuntimeCatalog) -> None:
                 _part("developer_constraints", "Do not execute actions and classify risk conservatively."),
                 _part("runtime_context", "Incident, severity, and mitigation policy.", ["incident_id", "current_fact_set_version", "service_id"]),
                 _part("domain_context", "Confirmed facts, top hypotheses, runbooks, and deploy context.", ["confirmed_fact_refs", "top_hypothesis_refs"]),
-                _part("memory_context", "Prior successful mitigations for the same service."),
+                _part("memory_context", "Prior successful mitigations for the same service.", ["memory_context"]),
                 _part("tool_manifest", "Read-only recommendation tools."),
                 _part("output_contract", "Runbook advisor output schema."),
             ],
@@ -548,6 +552,7 @@ def register_opsgraph(catalog: RuntimeCatalog) -> None:
                 _var("confirmed_fact_refs", "database"),
                 _var("top_hypothesis_refs", "database"),
                 _var("service_id", "workflow_state"),
+                _var("memory_context", "memory", required=False),
             ],
             response_schema_ref="opsgraph.runbook_advisor.output.v1",
             model_profile_id="reasoning.standard",
@@ -595,7 +600,7 @@ def register_opsgraph(catalog: RuntimeCatalog) -> None:
                 _part("developer_constraints", "Do not invent missing causality or root cause."),
                 _part("runtime_context", "Incident, resolution state, and final fact set.", ["incident_id", "current_fact_set_version", "resolution_summary"]),
                 _part("domain_context", "Confirmed facts, timeline events, and deploy refs.", ["confirmed_fact_refs", "timeline_refs"]),
-                _part("memory_context", "Organization postmortem style preferences."),
+                _part("memory_context", "Organization postmortem style preferences.", ["memory_context"]),
                 _part("tool_manifest", "Read-only retrospective tools."),
                 _part("output_contract", "Postmortem output schema."),
             ],
@@ -605,6 +610,7 @@ def register_opsgraph(catalog: RuntimeCatalog) -> None:
                 _var("confirmed_fact_refs", "database"),
                 _var("timeline_refs", "database"),
                 _var("resolution_summary", "database"),
+                _var("memory_context", "memory", required=False),
             ],
             response_schema_ref="opsgraph.postmortem.output.v1",
             model_profile_id="generation.grounded",

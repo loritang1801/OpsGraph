@@ -53,6 +53,12 @@ def _to_markdown(payload: dict) -> str:
         f"- Latency regression total ms: `{payload['report'].get('latency_regression_total_ms')}`",
         f"- Avg latency delta ms: `{payload['report'].get('avg_latency_delta_ms')}`",
         f"- Max latency delta ms: `{payload['report'].get('max_latency_delta_ms')}`",
+        f"- Semantic checks: `{payload['report'].get('semantic_check_count')}`",
+        f"- Semantic mismatches: `{payload['report'].get('semantic_mismatch_count')}`",
+        f"- Semantic match rate: `{payload['report'].get('semantic_match_rate')}`",
+        f"- Top hypothesis hit rate: `{payload['report'].get('top_hypothesis_hit_rate')}`",
+        f"- Recommendation match rate: `{payload['report'].get('recommendation_match_rate')}`",
+        f"- Comms match rate: `{payload['report'].get('comms_match_rate')}`",
         "",
         "## Artifacts",
         "",
@@ -67,9 +73,26 @@ def _to_markdown(payload: dict) -> str:
         f"- Baseline checkpoint seq: `{payload['report'].get('baseline_checkpoint_seq')}`",
         f"- Replay checkpoint seq: `{payload['report'].get('replay_checkpoint_seq')}`",
         "",
-        "## Node Diffs",
+        "## Semantic Checks",
         "",
     ]
+    for check in payload["report"].get("semantic_checks", []):
+        lines.extend(
+            [
+                f"### {check['check_name']}",
+                f"- Matched: `{check['matched']}`",
+                f"- Expected: {check.get('expected_summary')}",
+                f"- Actual: {check.get('actual_summary')}",
+                f"- Detail: {check.get('detail')}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+        "## Node Diffs",
+        "",
+        ]
+    )
     for node in payload["report"].get("node_diffs", []):
         lines.extend(
             [

@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from opsgraph_app.shared_runtime import load_shared_agent_platform
+from opsgraph_app.replay_worker_monitor_page import render_replay_worker_monitor_html
 from opsgraph_app.routes import (
     _event_topics,
     _event_topic,
@@ -26,6 +27,23 @@ from opsgraph_app.routes import (
 )
 
 _AP = load_shared_agent_platform()
+
+
+class OpsGraphReplayWorkerMonitorPageTests(unittest.TestCase):
+    def test_monitor_page_renderer_includes_admin_endpoints(self) -> None:
+        markup = render_replay_worker_monitor_html()
+
+        self.assertIn("OpsGraph Replay Worker Monitor", markup)
+        self.assertIn("Remote Provider Smoke", markup)
+        self.assertIn("Remote Smoke Drilldown", markup)
+        self.assertIn("smokeCopyFormat", markup)
+        self.assertIn("/api/v1/opsgraph/runtime/remote-provider-smoke", markup)
+        self.assertIn("/api/v1/opsgraph/runtime-capabilities", markup)
+        self.assertIn("/api/v1/opsgraph/runtime/remote-provider-smoke-summary", markup)
+        self.assertIn("/api/v1/opsgraph/runtime/remote-provider-smoke-runs", markup)
+        self.assertIn("/api/v1/opsgraph/replays/worker-monitor-presets", markup)
+        self.assertIn("/api/v1/opsgraph/replays/worker-monitor-default-preset", markup)
+        self.assertIn("/api/v1/opsgraph/replays/worker-monitor-shift-schedule", markup)
 
 
 class OpsGraphRouteErrorMappingTests(unittest.TestCase):

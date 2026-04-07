@@ -22,6 +22,8 @@ from opsgraph_app.repository import (
     ApprovalTaskRow,
     ArtifactBlobRow,
     CommsDraftRow,
+    ContextBundleRow,
+    MemoryRecordRow,
     PostmortemRow,
     ReplayCaseRow,
     ReplayRunRow,
@@ -154,6 +156,56 @@ class OpsGraphServiceTests(unittest.TestCase):
                 ),
                 idempotency_key="ops-alert-conflict",
             )
+
+    def test_alert_ingest_groups_similar_service_alerts_within_time_window(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        first = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="payments-api:latency-spike",
+                summary="Payments API latency spike on checkout path",
+                source="grafana",
+                observed_at="2026-03-16T10:00:00Z",
+            )
+        )
+        second = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="payments-api:latency-burst",
+                summary="Payments API latency burst on checkout path",
+                source="grafana",
+                observed_at="2026-03-16T10:20:00Z",
+            )
+        )
+
+        self.assertTrue(first.incident_created)
+        self.assertFalse(second.incident_created)
+        self.assertEqual(first.incident_id, second.incident_id)
+
+    def test_alert_ingest_creates_new_incident_outside_aggregation_window(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        first = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="payments-api:latency-spike",
+                summary="Payments API latency spike on checkout path",
+                source="grafana",
+                observed_at="2026-03-16T10:00:00Z",
+            )
+        )
+        second = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="payments-api:latency-burst",
+                summary="Payments API latency burst on checkout path",
+                source="grafana",
+                observed_at="2026-03-16T13:30:00Z",
+            )
+        )
+
+        self.assertTrue(first.incident_created)
+        self.assertTrue(second.incident_created)
+        self.assertNotEqual(first.incident_id, second.incident_id)
 
     def test_incident_workspace_contract_fields_serialize_with_aliases(self) -> None:
         service = build_app_service()
@@ -616,6 +668,308 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(published.status, "published")
         self.assertTrue(any(event.payload.get("comms_status") == "published" for event in matching))
 
+    def test_publish_comms_uses_remote_provider_when_configured(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        class _RemotePublishClient:
+            def __init__(self) -> None:
+                self.post_calls: list[dict[str, object]] = []
+
+            def get(self, url: str, *, headers: dict[str, str], follow_redirects: bool, timeout: float):
+                raise RuntimeError("GET not expected")
+
+            def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                json: dict[str, object],
+                follow_redirects: bool,
+                timeout: float,
+            ):
+                self.post_calls.append(
+                    {
+                        "url": url,
+                        "headers": dict(headers),
+                        "json": dict(json),
+                        "follow_redirects": follow_redirects,
+                        "timeout": timeout,
+                    }
+                )
+
+                class _Response:
+                    status_code = 200
+                    text = ""
+                    url = "https://publisher.example.test/messages/internal_slack"
+
+                    @staticmethod
+                    def json():
+                        return {
+                            "published_message_ref": "slack-msg-remote-1",
+                            "delivery_state": "published",
+                        }
+
+                    @staticmethod
+                    def raise_for_status() -> None:
+                        return None
+
+                return _Response()
+
+        fake_client = _RemotePublishClient()
+        service.repository.remote_tool_resolver = service.repository.remote_tool_resolver.__class__(
+            http_client=fake_client
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_COMMS_PUBLISH_PROVIDER": "http",
+                "OPSGRAPH_COMMS_PUBLISH_URL_TEMPLATE": "https://publisher.example.test/messages/{channel_type}",
+                "OPSGRAPH_COMMS_PUBLISH_CONNECTION_ID": "slack-publish-http",
+            },
+            clear=False,
+        ):
+            published = service.publish_comms("incident-1", "draft-1", comms_publish_command())
+
+        self.assertEqual(published.status, "published")
+        self.assertEqual(published.delivery_state, "published")
+        self.assertEqual(published.delivery_confirmed, True)
+        self.assertEqual(published.provider_delivery_status, "published")
+        self.assertEqual(published.published_message_ref, "slack-msg-remote-1")
+        self.assertIsNotNone(published.published_at)
+        self.assertEqual(fake_client.post_calls[0]["json"]["channel_type"], "internal_slack")
+        self.assertIn("Rollback restored availability", str(fake_client.post_calls[0]["json"]["body_markdown"]))
+
+    def test_publish_comms_normalizes_remote_delivery_acceptance(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        class _RemoteAcceptedClient:
+            def __init__(self) -> None:
+                self.post_calls: list[dict[str, object]] = []
+
+            def get(self, url: str, *, headers: dict[str, str], follow_redirects: bool, timeout: float):
+                raise RuntimeError("GET not expected")
+
+            def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                json: dict[str, object],
+                follow_redirects: bool,
+                timeout: float,
+            ):
+                self.post_calls.append({"url": url, "json": dict(json)})
+
+                class _Response:
+                    status_code = 200
+                    text = ""
+                    url = "https://publisher.example.test/messages/internal_slack"
+
+                    @staticmethod
+                    def json():
+                        return {
+                            "message_id": "slack-msg-accepted-1",
+                            "status": "queued",
+                        }
+
+                    @staticmethod
+                    def raise_for_status() -> None:
+                        return None
+
+                return _Response()
+
+        fake_client = _RemoteAcceptedClient()
+        service.repository.remote_tool_resolver = service.repository.remote_tool_resolver.__class__(
+            http_client=fake_client
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_COMMS_PUBLISH_PROVIDER": "http",
+                "OPSGRAPH_COMMS_PUBLISH_URL_TEMPLATE": "https://publisher.example.test/messages/{channel_type}",
+            },
+            clear=False,
+        ):
+            published = service.publish_comms("incident-1", "draft-1", comms_publish_command())
+
+        workspace = service.get_incident_workspace("incident-1")
+
+        self.assertEqual(published.status, "accepted")
+        self.assertEqual(published.delivery_state, "accepted")
+        self.assertEqual(published.delivery_confirmed, False)
+        self.assertEqual(published.provider_delivery_status, "queued")
+        self.assertEqual(published.published_message_ref, "slack-msg-accepted-1")
+        self.assertIsNone(published.published_at)
+        self.assertEqual(workspace.comms_drafts[0].status, "accepted")
+
+    def test_publish_comms_can_confirm_remote_delivery_via_lookup(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        class _RemoteAcceptedWithLookupClient:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def get(self, url: str, *, headers: dict[str, str], follow_redirects: bool, timeout: float):
+                self.calls.append({"method": "GET", "url": url})
+                response_url = url
+
+                class _Response:
+                    def __init__(self) -> None:
+                        self.status_code = 200
+                        self.text = ""
+                        self.url = response_url
+
+                    @staticmethod
+                    def json():
+                        return {
+                            "message_id": "slack-msg-confirmed-1",
+                            "status": "published",
+                        }
+
+                    @staticmethod
+                    def raise_for_status() -> None:
+                        return None
+
+                return _Response()
+
+            def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                json: dict[str, object],
+                follow_redirects: bool,
+                timeout: float,
+            ):
+                self.calls.append({"method": "POST", "url": url, "json": dict(json)})
+
+                class _Response:
+                    status_code = 200
+                    text = ""
+                    url = "https://publisher.example.test/messages/internal_slack"
+
+                    @staticmethod
+                    def json():
+                        return {
+                            "message_id": "slack-msg-confirmed-1",
+                            "status": "queued",
+                        }
+
+                    @staticmethod
+                    def raise_for_status() -> None:
+                        return None
+
+                return _Response()
+
+        fake_client = _RemoteAcceptedWithLookupClient()
+        service.repository.remote_tool_resolver = service.repository.remote_tool_resolver.__class__(
+            http_client=fake_client
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_COMMS_PUBLISH_PROVIDER": "http",
+                "OPSGRAPH_COMMS_PUBLISH_URL_TEMPLATE": "https://publisher.example.test/messages/{channel_type}",
+                "OPSGRAPH_COMMS_PUBLISH_STATUS_URL_TEMPLATE": (
+                    "https://publisher.example.test/messages/{channel_type}/{published_message_ref}/status"
+                ),
+            },
+            clear=False,
+        ):
+            published = service.publish_comms("incident-1", "draft-1", comms_publish_command())
+
+        workspace = service.get_incident_workspace("incident-1")
+
+        self.assertEqual(published.status, "published")
+        self.assertEqual(published.delivery_state, "published")
+        self.assertEqual(published.delivery_confirmed, True)
+        self.assertEqual(published.provider_delivery_status, "published")
+        self.assertEqual(published.published_message_ref, "slack-msg-confirmed-1")
+        self.assertIsNotNone(published.published_at)
+        self.assertEqual(workspace.comms_drafts[0].status, "published")
+        self.assertTrue(
+            any(
+                call["method"] == "GET"
+                and "/slack-msg-confirmed-1/status" in str(call["url"])
+                for call in fake_client.calls
+            )
+        )
+
+    def test_publish_comms_records_remote_delivery_failure_without_marking_published(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        class _RemoteFailedClient:
+            def get(self, url: str, *, headers: dict[str, str], follow_redirects: bool, timeout: float):
+                raise RuntimeError("GET not expected")
+
+            def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                json: dict[str, object],
+                follow_redirects: bool,
+                timeout: float,
+            ):
+                class _Response:
+                    status_code = 200
+                    text = ""
+                    url = "https://publisher.example.test/messages/internal_slack"
+
+                    @staticmethod
+                    def json():
+                        return {
+                            "delivery_state": "failed",
+                            "delivery_error": {
+                                "code": "channel_unavailable",
+                                "message": "Slack channel is temporarily unavailable.",
+                            },
+                        }
+
+                    @staticmethod
+                    def raise_for_status() -> None:
+                        return None
+
+                return _Response()
+
+        service.repository.remote_tool_resolver = service.repository.remote_tool_resolver.__class__(
+            http_client=_RemoteFailedClient()
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_COMMS_PUBLISH_PROVIDER": "http",
+                "OPSGRAPH_COMMS_PUBLISH_URL_TEMPLATE": "https://publisher.example.test/messages/{channel_type}",
+            },
+            clear=False,
+        ):
+            published = service.publish_comms("incident-1", "draft-1", comms_publish_command())
+
+        workspace = service.get_incident_workspace("incident-1")
+
+        self.assertEqual(published.status, "failed")
+        self.assertEqual(published.delivery_state, "failed")
+        self.assertEqual(published.delivery_confirmed, True)
+        self.assertEqual(published.provider_delivery_status, "failed")
+        self.assertIsNone(published.published_message_ref)
+        self.assertIsNone(published.published_at)
+        self.assertEqual(
+            published.delivery_error,
+            {
+                "code": "channel_unavailable",
+                "message": "Slack channel is temporarily unavailable.",
+            },
+        )
+        self.assertEqual(workspace.comms_drafts[0].status, "failed")
+
     def test_decide_recommendation_emits_approval_updated_outbox_event(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
@@ -648,6 +1002,28 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertTrue(
             any(item["correlation_key"] == "checkout-api:high-error-rate" for item in seed["signal_summaries"])
         )
+
+    def test_incident_execution_seed_includes_context_bundle_and_memory(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        seed = service.repository.get_incident_execution_seed("incident-1")
+
+        self.assertEqual(seed["context_bundle_id"], "context-incident-1-v1")
+        self.assertEqual(seed["context_missing_sources"], [])
+        self.assertTrue(seed["investigation_memory_context"])
+        self.assertTrue(seed["recommendation_memory_context"])
+        self.assertTrue(
+            any(item["memory_type"] == "incident_pattern" for item in seed["investigation_memory_context"])
+        )
+        self.assertTrue(
+            any(item["memory_type"] == "successful_mitigation" for item in seed["recommendation_memory_context"])
+        )
+
+        with service.repository.session_factory() as session:
+            bundle_row = session.get(ContextBundleRow, "context-incident-1-v1")
+
+        self.assertIsNotNone(bundle_row)
 
     def test_generated_incident_response_binds_comms_to_approval_task(self) -> None:
         service = build_app_service()
@@ -705,6 +1081,57 @@ class OpsGraphServiceTests(unittest.TestCase):
 
         self.assertEqual(published.status, "published")
 
+    def test_resolve_incident_persists_successful_mitigation_memory(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        ingest = service.ingest_alert(
+            alert_ingest_command(
+                correlation_key="catalog-api:error-spike",
+                summary="Catalog API error spike",
+                source="grafana",
+            )
+        )
+        created_fact = service.add_fact(ingest.incident_id, fact_create_command())
+        command = service.repository.get_incident_execution_seed(ingest.incident_id) | {
+            "workflow_run_id": "opsgraph-memory-catalog-1"
+        }
+        service.respond_to_incident(command)
+        workspace = service.get_incident_workspace(ingest.incident_id)
+        service.decide_recommendation(
+            ingest.incident_id,
+            workspace.recommendations[0].recommendation_id,
+            recommendation_decision_command(
+                approval_task_id=workspace.approval_tasks[0].approval_task_id,
+            ),
+        )
+
+        service.resolve_incident(
+            ingest.incident_id,
+            resolve_incident_command(
+                resolution_summary="Scaled catalog workers and drained the queue.",
+            )
+            | {"root_cause_fact_ids": [created_fact.fact_id]},
+        )
+        seed = service.repository.get_incident_execution_seed(ingest.incident_id)
+
+        self.assertTrue(
+            any(
+                item["memory_type"] == "successful_mitigation"
+                and item["summary"] == "Scaled catalog workers and drained the queue."
+                for item in seed["recommendation_memory_context"]
+            )
+        )
+
+        with service.repository.session_factory() as session:
+            memory_rows = session.scalars(
+                select(MemoryRecordRow)
+                .where(MemoryRecordRow.incident_id == ingest.incident_id)
+                .where(MemoryRecordRow.memory_type == "successful_mitigation")
+            ).all()
+
+        self.assertEqual(len(memory_rows), 1)
+
     def test_get_runtime_capabilities_reports_product_runtime_backends(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
@@ -715,10 +1142,25 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(capabilities.product, "opsgraph")
         self.assertEqual(capabilities.model_provider.effective_mode, "local")
         self.assertEqual(capabilities.model_provider.backend_id, "heuristic-local")
+        self.assertEqual(capabilities.model_provider.fallback_reason, "MODEL_PROVIDER_NOT_CONFIGURED")
+        self.assertEqual(capabilities.model_provider.details["fallback_enabled"], True)
+        self.assertEqual(capabilities.model_provider.details["fallback_policy_source"], "default")
+        self.assertEqual(capabilities.model_provider.details["strict_remote_required"], False)
+        self.assertIsNone(capabilities.model_provider.details["last_primary_error"])
         self.assertEqual(capabilities.tooling["incident_store"].backend_id, "sqlalchemy-repository")
         self.assertEqual(capabilities.tooling["deployment_lookup"].backend_id, "heuristic-github-adapter")
         self.assertEqual(capabilities.tooling["service_registry"].backend_id, "heuristic-service-registry")
         self.assertEqual(capabilities.tooling["runbook_search"].effective_mode, "local")
+        self.assertIsNotNone(capabilities.auth)
+        assert capabilities.auth is not None
+        self.assertEqual(capabilities.auth.mode, "demo_compatible")
+        self.assertEqual(capabilities.auth.header_fallback_enabled, True)
+        self.assertEqual(capabilities.auth.demo_seed_enabled, True)
+        self.assertEqual(capabilities.auth.bootstrap_admin_configured, False)
+        self.assertIsNotNone(capabilities.runtime_provider_alert)
+        assert capabilities.runtime_provider_alert is not None
+        self.assertEqual(capabilities.runtime_provider_alert.level, "healthy")
+        self.assertEqual(capabilities.runtime_provider_alert.active_alert_count, 0)
         self.assertIsNone(capabilities.replay_worker)
         self.assertIsNotNone(capabilities.replay_worker_alert)
         assert capabilities.replay_worker_alert is not None
@@ -731,8 +1173,63 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(health.runtime_summary.model_provider_mode, "local")
         self.assertEqual(health.runtime_summary.tooling_profile, "product-runtime")
         self.assertEqual(health.runtime_summary.tooling_backends["service_registry"], "heuristic-service-registry")
+        self.assertEqual(health.runtime_summary.auth_mode, "demo_compatible")
+        self.assertEqual(health.runtime_summary.auth_header_fallback_enabled, True)
+        self.assertEqual(health.runtime_summary.auth_demo_seed_enabled, True)
+        self.assertEqual(health.runtime_summary.auth_bootstrap_admin_configured, False)
+        self.assertEqual(health.runtime_summary.runtime_provider_alert_level, "healthy")
+        self.assertEqual(health.runtime_summary.runtime_provider_alert_count, 0)
         self.assertIsNone(health.runtime_summary.replay_worker_status)
         self.assertIsNone(health.runtime_summary.replay_worker_alert_level)
+
+    def test_get_runtime_capabilities_reports_strict_persistent_auth_defaults(self) -> None:
+        tmp_dir = _create_repo_tempdir("opsgraph-auth-service-")
+        database_url = f"sqlite+pysqlite:///{(tmp_dir / 'opsgraph.db').resolve().as_posix()}"
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_ALLOW_HEADER_AUTH_FALLBACK": "",
+                "OPSGRAPH_SEED_DEMO_AUTH": "",
+                "OPSGRAPH_BOOTSTRAP_ADMIN_EMAIL": "bootstrap-admin@example.com",
+                "OPSGRAPH_BOOTSTRAP_ADMIN_PASSWORD": "bootstrap-secret",
+                "OPSGRAPH_BOOTSTRAP_ADMIN_DISPLAY_NAME": "",
+                "OPSGRAPH_BOOTSTRAP_ORG_SLUG": "bootstrap-org",
+                "OPSGRAPH_BOOTSTRAP_ORG_NAME": "",
+            },
+            clear=False,
+        ):
+            service = build_app_service(database_url=database_url)
+        try:
+            capabilities = service.get_runtime_capabilities()
+            health = service.get_health_status()
+        finally:
+            service.close()
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        self.assertIsNotNone(capabilities.auth)
+        assert capabilities.auth is not None
+        self.assertEqual(capabilities.auth.mode, "strict")
+        self.assertEqual(capabilities.auth.header_fallback_enabled, False)
+        self.assertEqual(capabilities.auth.demo_seed_enabled, False)
+        self.assertEqual(capabilities.auth.bootstrap_admin_configured, True)
+        self.assertEqual(capabilities.auth.bootstrap_organization_slug, "bootstrap-org")
+        self.assertEqual(health.runtime_summary.auth_mode, "strict")
+        self.assertEqual(health.runtime_summary.auth_header_fallback_enabled, False)
+        self.assertEqual(health.runtime_summary.auth_demo_seed_enabled, False)
+        self.assertEqual(health.runtime_summary.auth_bootstrap_admin_configured, True)
+
+    def test_build_app_service_rejects_disabled_model_fallback_without_remote_configuration(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_MODEL_PROVIDER": "auto",
+                "OPSGRAPH_MODEL_ALLOW_FALLBACK": "false",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "MODEL_PROVIDER_NOT_CONFIGURED"):
+                build_app_service()
 
     def test_get_runtime_capabilities_reports_configured_remote_tool_backends(self) -> None:
         with patch.dict(
@@ -767,9 +1264,51 @@ class OpsGraphServiceTests(unittest.TestCase):
             self.assertEqual(capabilities.tooling["service_registry"].backend_id, "service-registry-api")
             self.assertEqual(capabilities.tooling["runbook_search"].effective_mode, "http")
             self.assertEqual(capabilities.tooling["runbook_search"].backend_id, "runbook-search-api")
+            self.assertIsNotNone(capabilities.runtime_provider_alert)
+            assert capabilities.runtime_provider_alert is not None
+            self.assertEqual(capabilities.runtime_provider_alert.level, "healthy")
+            self.assertEqual(capabilities.runtime_provider_alert.active_alert_count, 0)
             health = service.get_health_status()
             self.assertEqual(health.runtime_summary.tooling_modes["service_registry"], "http")
             self.assertEqual(health.runtime_summary.tooling_backends["service_registry"], "service-registry-api")
+            self.assertEqual(health.runtime_summary.runtime_provider_alert_level, "healthy")
+            self.assertEqual(health.runtime_summary.runtime_provider_alert_count, 0)
+
+    def test_get_runtime_capabilities_reports_unavailable_remote_tool_when_fallback_disabled(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_RUNBOOK_SEARCH_PROVIDER": "auto",
+                "OPSGRAPH_RUNBOOK_SEARCH_ALLOW_FALLBACK": "false",
+            },
+            clear=False,
+        ):
+            service = build_app_service()
+            self.addCleanup(service.close)
+
+            capabilities = service.get_runtime_capabilities()
+            health = service.get_health_status()
+
+        runbook_search = capabilities.tooling["runbook_search"]
+        self.assertEqual(runbook_search.requested_mode, "auto")
+        self.assertEqual(runbook_search.effective_mode, "unavailable")
+        self.assertEqual(runbook_search.backend_id, "http-runbook-provider")
+        self.assertEqual(runbook_search.fallback_reason, "OPSGRAPH_RUNBOOK_SEARCH_HTTP_TEMPLATE_NOT_CONFIGURED")
+        self.assertEqual(runbook_search.details["fallback_enabled"], False)
+        self.assertEqual(runbook_search.details["fallback_policy_source"], "env")
+        self.assertEqual(runbook_search.details["strict_remote_required"], True)
+        self.assertIsNone(runbook_search.details["last_remote_error"])
+        self.assertIsNotNone(capabilities.runtime_provider_alert)
+        assert capabilities.runtime_provider_alert is not None
+        self.assertEqual(capabilities.runtime_provider_alert.level, "critical")
+        self.assertEqual(capabilities.runtime_provider_alert.active_alert_count, 1)
+        self.assertEqual(capabilities.runtime_provider_alert.alerts[0].capability_name, "runbook_search")
+        self.assertEqual(
+            capabilities.runtime_provider_alert.alerts[0].reason_code,
+            "OPSGRAPH_RUNBOOK_SEARCH_HTTP_TEMPLATE_NOT_CONFIGURED",
+        )
+        self.assertEqual(health.runtime_summary.runtime_provider_alert_level, "critical")
+        self.assertEqual(health.runtime_summary.runtime_provider_alert_count, 1)
 
     def test_get_runtime_capabilities_reports_configured_replay_worker_alert_policy(self) -> None:
         with patch.dict(
@@ -789,6 +1328,418 @@ class OpsGraphServiceTests(unittest.TestCase):
             assert capabilities.replay_worker_alert_policy is not None
             self.assertEqual(capabilities.replay_worker_alert_policy.warning_consecutive_failures, 2)
             self.assertEqual(capabilities.replay_worker_alert_policy.critical_consecutive_failures, 4)
+
+    def test_run_remote_provider_smoke_reports_skipped_defaults_without_remote_configuration(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        smoke = service.run_remote_provider_smoke({})
+
+        self.assertEqual(
+            smoke.providers,
+            ["deployment_lookup", "service_registry", "runbook_search", "change_context"],
+        )
+        self.assertEqual(smoke.summary.success_count, 0)
+        self.assertEqual(smoke.summary.skipped_count, 4)
+        self.assertEqual(smoke.summary.failed_count, 0)
+        self.assertEqual(smoke.exit_code, 0)
+        self.assertTrue(str(smoke.diagnostic_run_id).startswith("runtime-smoke-"))
+        self.assertIsNotNone(smoke.created_at)
+        self.assertTrue(
+            all(result.status == "skipped" for result in smoke.results)
+        )
+
+    def test_run_remote_provider_smoke_respects_require_configured_for_skipped_provider(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        smoke = service.run_remote_provider_smoke(
+            {
+                "providers": ["deployment_lookup"],
+                "require_configured": True,
+            }
+        )
+
+        self.assertEqual(smoke.summary.success_count, 0)
+        self.assertEqual(smoke.summary.skipped_count, 1)
+        self.assertEqual(smoke.summary.failed_count, 0)
+        self.assertEqual(smoke.exit_code, 1)
+        self.assertEqual(smoke.results[0].provider, "deployment_lookup")
+        self.assertEqual(smoke.results[0].status, "skipped")
+
+    def test_run_remote_provider_smoke_persists_history_with_actor_context(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        auth_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+        smoke = service.run_remote_provider_smoke(
+            {"providers": ["deployment_lookup"]},
+            auth_context=auth_context,
+            request_id="req-runtime-smoke-1",
+        )
+        history = service.list_remote_provider_smoke_runs(limit=1)
+
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].diagnostic_run_id, smoke.diagnostic_run_id)
+        self.assertEqual(history[0].actor_type, "user")
+        self.assertEqual(history[0].actor_user_id, "user-admin-1")
+        self.assertEqual(history[0].actor_role, "product_admin")
+        self.assertEqual(history[0].request_id, "req-runtime-smoke-1")
+        self.assertEqual(history[0].request_payload["providers"], ["deployment_lookup"])
+        self.assertEqual(history[0].response.summary.skipped_count, 1)
+
+    def test_list_remote_provider_smoke_runs_supports_actor_request_and_provider_filters(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        admin_context = self._issue_auth_context(
+            service,
+            email="admin@example.com",
+            required_role="product_admin",
+        )
+        first = service.run_remote_provider_smoke(
+            {"providers": ["deployment_lookup"]},
+            auth_context=admin_context,
+            request_id="req-runtime-smoke-filter-admin",
+        )
+        second = service.run_remote_provider_smoke(
+            {"providers": ["runbook_search"]},
+            request_id="req-runtime-smoke-filter-system",
+        )
+
+        by_actor = service.list_remote_provider_smoke_runs(
+            limit=10,
+            actor_user_id="user-admin-1",
+        )
+        by_request = service.list_remote_provider_smoke_runs(
+            limit=10,
+            request_id="req-runtime-smoke-filter-system",
+        )
+        by_provider = service.list_remote_provider_smoke_runs(
+            limit=10,
+            provider="runbook_search",
+        )
+
+        self.assertEqual([item.diagnostic_run_id for item in by_actor], [first.diagnostic_run_id])
+        self.assertEqual([item.diagnostic_run_id for item in by_request], [second.diagnostic_run_id])
+        self.assertEqual([item.diagnostic_run_id for item in by_provider], [second.diagnostic_run_id])
+
+    def test_list_remote_provider_smoke_runs_rejects_invalid_limit(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        with self.assertRaisesRegex(ValueError, "INVALID_REMOTE_PROVIDER_SMOKE_HISTORY_LIMIT"):
+            service.list_remote_provider_smoke_runs(limit=0)
+
+    def test_summarize_remote_provider_smoke_runs_returns_provider_aggregates(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        first = service.repository.record_remote_provider_smoke_run(
+            request_payload={"providers": ["deployment_lookup", "runbook_search"]},
+            response_payload={
+                "providers": ["deployment_lookup", "runbook_search"],
+                "summary": {"success_count": 1, "skipped_count": 1, "failed_count": 0},
+                "results": [
+                    {
+                        "provider": "deployment_lookup",
+                        "status": "success",
+                        "reason": None,
+                        "capability": {
+                            "requested_mode": "http",
+                            "effective_mode": "http",
+                            "backend_id": "http-deployment-provider",
+                            "fallback_reason": None,
+                            "details": {"strict_remote_required": True},
+                        },
+                        "request": {"service_id": "checkout-api"},
+                        "response": {"deployments": []},
+                        "provenance": None,
+                    },
+                    {
+                        "provider": "runbook_search",
+                        "status": "skipped",
+                        "reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                        "capability": {
+                            "requested_mode": "auto",
+                            "effective_mode": "local",
+                            "backend_id": "heuristic-runbook-index",
+                            "fallback_reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                            "details": {"strict_remote_required": False},
+                        },
+                        "request": {"service_id": "checkout-api"},
+                        "response": None,
+                        "provenance": None,
+                    },
+                ],
+                "exit_code": 0,
+            },
+        )
+        second = service.repository.record_remote_provider_smoke_run(
+            request_payload={"providers": ["deployment_lookup"]},
+            response_payload={
+                "providers": ["deployment_lookup"],
+                "summary": {"success_count": 0, "skipped_count": 0, "failed_count": 1},
+                "results": [
+                    {
+                        "provider": "deployment_lookup",
+                        "status": "failed",
+                        "reason": "RuntimeError",
+                        "capability": {
+                            "requested_mode": "auto",
+                            "effective_mode": "local",
+                            "backend_id": "heuristic-github-adapter",
+                            "fallback_reason": "OPSGRAPH_DEPLOYMENT_LOOKUP_REMOTE_REQUEST_FAILED",
+                            "details": {"strict_remote_required": False},
+                        },
+                        "request": {"service_id": "checkout-api"},
+                        "response": None,
+                        "provenance": None,
+                    }
+                ],
+                "exit_code": 1,
+            },
+        )
+
+        summary = service.summarize_remote_provider_smoke_runs(limit=10)
+        deployment_summary = next(item for item in summary.providers if item.provider == "deployment_lookup")
+        runbook_summary = next(item for item in summary.providers if item.provider == "runbook_search")
+
+        self.assertEqual(summary.scanned_run_count, 2)
+        self.assertEqual(summary.provider_count, 2)
+        self.assertEqual(deployment_summary.run_count, 2)
+        self.assertEqual(deployment_summary.success_count, 1)
+        self.assertEqual(deployment_summary.failed_count, 1)
+        self.assertEqual(deployment_summary.skipped_count, 0)
+        self.assertEqual(deployment_summary.consecutive_failure_count, 1)
+        self.assertEqual(deployment_summary.consecutive_non_success_count, 1)
+        self.assertEqual(deployment_summary.last_status, "failed")
+        self.assertEqual(deployment_summary.last_reason, "RuntimeError")
+        self.assertEqual(deployment_summary.last_diagnostic_run_id, second.diagnostic_run_id)
+        self.assertIsNotNone(deployment_summary.last_success_at)
+        self.assertIsNotNone(deployment_summary.last_failure_at)
+        self.assertEqual(runbook_summary.run_count, 1)
+        self.assertEqual(runbook_summary.skipped_count, 1)
+        self.assertEqual(runbook_summary.consecutive_failure_count, 0)
+        self.assertEqual(runbook_summary.consecutive_non_success_count, 1)
+        self.assertEqual(runbook_summary.last_status, "skipped")
+        self.assertEqual(runbook_summary.last_diagnostic_run_id, first.diagnostic_run_id)
+
+    def test_summarize_remote_provider_smoke_runs_supports_provider_filter(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.repository.record_remote_provider_smoke_run(
+            request_payload={"providers": ["deployment_lookup"]},
+            response_payload={
+                "providers": ["deployment_lookup"],
+                "summary": {"success_count": 0, "skipped_count": 1, "failed_count": 0},
+                "results": [
+                    {
+                        "provider": "deployment_lookup",
+                        "status": "skipped",
+                        "reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                        "capability": {
+                            "requested_mode": "auto",
+                            "effective_mode": "local",
+                            "backend_id": "heuristic-github-adapter",
+                            "fallback_reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                            "details": {"strict_remote_required": False},
+                        },
+                        "request": {"service_id": "checkout-api"},
+                        "response": None,
+                        "provenance": None,
+                    }
+                ],
+                "exit_code": 0,
+            },
+        )
+        service.repository.record_remote_provider_smoke_run(
+            request_payload={"providers": ["runbook_search"]},
+            response_payload={
+                "providers": ["runbook_search"],
+                "summary": {"success_count": 0, "skipped_count": 1, "failed_count": 0},
+                "results": [
+                    {
+                        "provider": "runbook_search",
+                        "status": "skipped",
+                        "reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                        "capability": {
+                            "requested_mode": "auto",
+                            "effective_mode": "local",
+                            "backend_id": "heuristic-runbook-index",
+                            "fallback_reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                            "details": {"strict_remote_required": False},
+                        },
+                        "request": {"service_id": "checkout-api"},
+                        "response": None,
+                        "provenance": None,
+                    }
+                ],
+                "exit_code": 0,
+            },
+        )
+
+        summary = service.summarize_remote_provider_smoke_runs(
+            limit=10,
+            provider="runbook_search",
+        )
+
+        self.assertEqual(summary.scanned_run_count, 1)
+        self.assertEqual(summary.provider_count, 1)
+        self.assertEqual(summary.providers[0].provider, "runbook_search")
+
+    def test_get_runtime_capabilities_reports_healthy_remote_provider_smoke_alert_without_failures(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        capabilities = service.get_runtime_capabilities()
+        health = service.get_health_status()
+
+        self.assertIsNotNone(capabilities.remote_provider_smoke_alert)
+        assert capabilities.remote_provider_smoke_alert is not None
+        self.assertEqual(capabilities.remote_provider_smoke_alert.level, "healthy")
+        self.assertEqual(capabilities.remote_provider_smoke_alert.active_alert_count, 0)
+        self.assertEqual(health.runtime_summary.remote_provider_smoke_alert_level, "healthy")
+        self.assertEqual(health.runtime_summary.remote_provider_smoke_alert_count, 0)
+
+    def test_get_runtime_capabilities_reports_warning_and_critical_remote_provider_smoke_alerts(self) -> None:
+        service = build_app_service(
+            remote_provider_smoke_alert_warning_consecutive_failures=1,
+            remote_provider_smoke_alert_critical_consecutive_failures=2,
+        )
+        self.addCleanup(service.close)
+
+        service.repository.record_remote_provider_smoke_run(
+            request_payload={"providers": ["deployment_lookup"]},
+            response_payload={
+                "providers": ["deployment_lookup"],
+                "summary": {"success_count": 0, "skipped_count": 0, "failed_count": 1},
+                "results": [
+                    {
+                        "provider": "deployment_lookup",
+                        "status": "failed",
+                        "reason": "RuntimeError",
+                        "capability": {
+                            "requested_mode": "auto",
+                            "effective_mode": "local",
+                            "backend_id": "heuristic-github-adapter",
+                            "fallback_reason": "REMOTE_REQUEST_FAILED",
+                            "details": {"strict_remote_required": False},
+                        },
+                        "request": {"service_id": "checkout-api"},
+                        "response": None,
+                        "provenance": None,
+                    }
+                ],
+                "exit_code": 1,
+            },
+        )
+        warning_capabilities = service.get_runtime_capabilities()
+        warning_health = service.get_health_status()
+
+        self.assertIsNotNone(warning_capabilities.remote_provider_smoke_alert)
+        assert warning_capabilities.remote_provider_smoke_alert is not None
+        self.assertEqual(warning_capabilities.remote_provider_smoke_alert.level, "warning")
+        self.assertEqual(warning_capabilities.remote_provider_smoke_alert.active_alert_count, 1)
+        self.assertEqual(
+            warning_capabilities.remote_provider_smoke_alert.alerts[0].consecutive_failure_count,
+            1,
+        )
+        self.assertEqual(warning_health.runtime_summary.remote_provider_smoke_alert_level, "warning")
+
+        service.repository.record_remote_provider_smoke_run(
+            request_payload={"providers": ["deployment_lookup"]},
+            response_payload={
+                "providers": ["deployment_lookup"],
+                "summary": {"success_count": 0, "skipped_count": 0, "failed_count": 1},
+                "results": [
+                    {
+                        "provider": "deployment_lookup",
+                        "status": "failed",
+                        "reason": "TimeoutError",
+                        "capability": {
+                            "requested_mode": "auto",
+                            "effective_mode": "local",
+                            "backend_id": "heuristic-github-adapter",
+                            "fallback_reason": "REMOTE_REQUEST_FAILED",
+                            "details": {"strict_remote_required": False},
+                        },
+                        "request": {"service_id": "checkout-api"},
+                        "response": None,
+                        "provenance": None,
+                    }
+                ],
+                "exit_code": 1,
+            },
+        )
+        critical_capabilities = service.get_runtime_capabilities()
+        critical_health = service.get_health_status()
+
+        self.assertEqual(critical_capabilities.remote_provider_smoke_alert.level, "critical")
+        self.assertEqual(critical_capabilities.remote_provider_smoke_alert.active_alert_count, 1)
+        self.assertEqual(
+            critical_capabilities.remote_provider_smoke_alert.alerts[0].consecutive_failure_count,
+            2,
+        )
+        self.assertEqual(
+            critical_capabilities.remote_provider_smoke_alert.alerts[0].reason_code,
+            "TimeoutError",
+        )
+        self.assertEqual(critical_health.runtime_summary.remote_provider_smoke_alert_level, "critical")
+        self.assertEqual(critical_health.runtime_summary.remote_provider_smoke_alert_count, 1)
+
+    def test_get_runtime_capabilities_reports_warning_after_remote_tool_error_with_fallback(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        class _FailingRemoteReadClient:
+            def get(self, url: str, *, headers: dict[str, str], follow_redirects: bool, timeout: float):
+                del url, headers, follow_redirects, timeout
+                raise RuntimeError("provider unavailable")
+
+            def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                json: dict[str, object],
+                follow_redirects: bool,
+                timeout: float,
+            ):
+                del url, headers, json, follow_redirects, timeout
+                raise RuntimeError("POST not expected")
+
+        service.repository.remote_tool_resolver._http_client = _FailingRemoteReadClient()
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_RUNBOOK_SEARCH_PROVIDER": "auto",
+                "OPSGRAPH_RUNBOOK_SEARCH_URL_TEMPLATE": (
+                    "https://runbooks.example.test/search?service={service_id}&q={query}&limit={limit}"
+                ),
+            },
+            clear=False,
+        ):
+            smoke = service.run_remote_provider_smoke({"providers": ["runbook_search"]})
+            capabilities = service.get_runtime_capabilities()
+            health = service.get_health_status()
+
+        self.assertEqual(smoke.summary.failed_count, 1)
+        self.assertEqual(smoke.results[0].status, "failed")
+        self.assertIsNotNone(capabilities.runtime_provider_alert)
+        assert capabilities.runtime_provider_alert is not None
+        self.assertEqual(capabilities.runtime_provider_alert.level, "warning")
+        self.assertEqual(capabilities.runtime_provider_alert.active_alert_count, 1)
+        self.assertEqual(capabilities.runtime_provider_alert.alerts[0].capability_name, "runbook_search")
+        self.assertEqual(capabilities.runtime_provider_alert.alerts[0].reason_code, "RuntimeError")
+        self.assertEqual(health.runtime_summary.runtime_provider_alert_level, "warning")
+        self.assertEqual(health.runtime_summary.runtime_provider_alert_count, 1)
 
     def test_get_runtime_capabilities_uses_workspace_override_for_latest_worker_policy(self) -> None:
         service = build_app_service(
@@ -1634,6 +2585,80 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(len(first.published_drafts), 1)
         self.assertEqual(first.published_drafts[0].status, "published")
 
+    def test_decide_approval_task_uses_remote_publish_for_linked_drafts(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        class _RemotePublishClient:
+            def __init__(self) -> None:
+                self.post_calls: list[dict[str, object]] = []
+
+            def get(self, url: str, *, headers: dict[str, str], follow_redirects: bool, timeout: float):
+                raise RuntimeError("GET not expected")
+
+            def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                json: dict[str, object],
+                follow_redirects: bool,
+                timeout: float,
+            ):
+                self.post_calls.append({"url": url, "json": dict(json)})
+
+                class _Response:
+                    status_code = 200
+                    text = ""
+                    url = "https://publisher.example.test/messages/internal_slack"
+
+                    @staticmethod
+                    def json():
+                        return {
+                            "published_message_ref": "slack-msg-approval-1",
+                            "delivery_state": "published",
+                        }
+
+                    @staticmethod
+                    def raise_for_status() -> None:
+                        return None
+
+                return _Response()
+
+        now = service.repository._utcnow_naive()
+        with service.repository.session_factory.begin() as session:
+            draft_row = session.get(CommsDraftRow, "draft-1")
+            self.assertIsNotNone(draft_row)
+            draft_row.approval_task_id = "approval-task-1"
+            draft_row.updated_at = now
+
+        service.repository.remote_tool_resolver = service.repository.remote_tool_resolver.__class__(
+            http_client=_RemotePublishClient()
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPSGRAPH_COMMS_PUBLISH_PROVIDER": "http",
+                "OPSGRAPH_COMMS_PUBLISH_URL_TEMPLATE": "https://publisher.example.test/messages/{channel_type}",
+            },
+            clear=False,
+        ):
+            response = service.decide_approval_task(
+                "approval-task-1",
+                approval_decision_command(
+                    decision="approve",
+                    publish_linked_drafts=True,
+                    expected_fact_set_version=1,
+                ),
+                idempotency_key="approval-orchestrate-remote-1",
+            )
+
+        self.assertEqual(len(response.published_drafts), 1)
+        self.assertEqual(response.published_drafts[0].published_message_ref, "slack-msg-approval-1")
+        self.assertEqual(response.published_drafts[0].delivery_state, "published")
+        self.assertEqual(response.published_drafts[0].delivery_confirmed, True)
+
     def test_decide_approval_task_validates_orchestration_inputs(self) -> None:
         service = build_app_service()
         self.addCleanup(service.close)
@@ -1934,6 +2959,21 @@ class OpsGraphServiceTests(unittest.TestCase):
         baseline = service.capture_replay_baseline(replay_baseline_capture_command())
         replay = service.start_replay_run(replay_run_command())
         executed = service.execute_replay_run(replay.replay_run_id)
+        baseline_state = service.get_workflow_state(baseline.workflow_run_id)
+        with service.runtime_stores.state_store.session_factory.begin() as session:
+            state_row = session.get(WorkflowStateRow, executed.workflow_run_id)
+            self.assertIsNotNone(state_row)
+            state_payload = dict(state_row.state_payload)
+            for key in (
+                "service_id",
+                "incident_status",
+                "current_fact_set_version",
+                "hypothesis_payloads",
+                "recommendation_payloads",
+                "comms_payloads",
+            ):
+                state_payload[key] = baseline_state.raw_state.get(key)
+            state_row.state_payload = state_payload
         report = service.evaluate_replay_run(
             replay.replay_run_id,
             replay_evaluation_command(baseline_id=baseline.baseline_id),
@@ -1961,6 +3001,15 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertGreaterEqual(report.latency_improvement_count, 0)
         self.assertGreaterEqual(report.latency_regression_total_ms, 0)
         self.assertIsNotNone(report.avg_latency_delta_ms)
+        self.assertEqual(report.semantic_mismatch_count, 0)
+        self.assertGreaterEqual(report.semantic_check_count, 6)
+        self.assertEqual(report.service_id_mismatch_count, 0)
+        self.assertEqual(report.incident_status_mismatch_count, 0)
+        self.assertEqual(report.fact_set_version_mismatch_count, 0)
+        self.assertEqual(report.top_hypothesis_hit_rate, 1.0)
+        self.assertEqual(report.recommendation_match_rate, 1.0)
+        self.assertEqual(report.comms_match_rate, 1.0)
+        self.assertTrue(all(item.matched for item in report.semantic_checks))
         self.assertIsNotNone(report.report_artifact_path)
         self.assertIsNotNone(report.markdown_report_path)
         self.assertIsNotNone(report.csv_report_path)
@@ -1970,6 +3019,8 @@ class OpsGraphServiceTests(unittest.TestCase):
         report_payload = json.loads(Path(report.report_artifact_path).read_text(encoding="utf-8"))
         self.assertEqual(report_payload["report"]["status"], "matched")
         self.assertEqual(report_payload["report"]["matched_node_count"], len(report.node_diffs))
+        self.assertEqual(report_payload["report"]["semantic_mismatch_count"], 0)
+        self.assertEqual(report_payload["report"]["top_hypothesis_hit_rate"], 1.0)
         self.assertEqual(report_payload["report"]["csv_report_path"], report.csv_report_path)
         csv_lines = Path(report.csv_report_path).read_text(encoding="utf-8").splitlines()
         self.assertTrue(csv_lines[0].startswith("checkpoint_seq,matched"))
@@ -2006,6 +3057,38 @@ class OpsGraphServiceTests(unittest.TestCase):
             state_payload = dict(state_row.state_payload)
             state_payload["current_state"] = "mitigate"
             state_payload["checkpoint_seq"] = int(state_payload.get("checkpoint_seq", state_row.checkpoint_seq - 1)) + 1
+            state_payload["service_id"] = "billing-api"
+            state_payload["incident_status"] = "responding"
+            state_payload["hypothesis_payloads"] = [
+                {
+                    "hypothesis_id": "hypothesis-replay-regression-1",
+                    "title": "Cache node saturation",
+                    "confidence": 0.51,
+                    "rank": 1,
+                    "evidence_refs": [{"kind": "incident_fact", "id": "fact-1"}],
+                    "verification_steps": [],
+                }
+            ]
+            state_payload["recommendation_payloads"] = [
+                {
+                    "recommendation_id": "recommendation-replay-regression-1",
+                    "title": "Drain cache traffic",
+                    "risk_level": "medium",
+                    "requires_approval": False,
+                    "instructions_markdown": "Shift traffic away from the hot cache node.",
+                    "evidence_refs": [{"kind": "incident_fact", "id": "fact-1"}],
+                    "approval_task_id": None,
+                }
+            ]
+            state_payload["comms_payloads"] = [
+                {
+                    "draft_id": "draft-replay-regression-1",
+                    "channel_type": "external_status_page",
+                    "fact_set_version": 99,
+                    "body_markdown": "Unplanned maintenance in progress for the cache tier.",
+                    "fact_refs": [{"kind": "incident_fact", "id": "fact-1"}],
+                }
+            ]
             state_row.state_payload = state_payload
 
         report = service.evaluate_replay_run(
@@ -2024,6 +3107,13 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(report.state_mismatch_count, 1)
         self.assertEqual(report.checkpoint_mismatch_count, 1)
         self.assertGreaterEqual(report.latency_regression_count, expected_latency_regression)
+        self.assertGreaterEqual(report.semantic_mismatch_count, 5)
+        self.assertEqual(report.service_id_mismatch_count, 1)
+        self.assertEqual(report.incident_status_mismatch_count, 1)
+        self.assertEqual(report.top_hypothesis_hit_rate, 0.0)
+        self.assertEqual(report.recommendation_match_rate, 0.0)
+        self.assertEqual(report.comms_match_rate, 0.0)
+        self.assertTrue(any(not item.matched for item in report.semantic_checks))
         if expected_latency_regression:
             self.assertGreater(report.latency_regression_total_ms, 0)
         self.assertIsNotNone(report.avg_latency_delta_ms)
@@ -2034,9 +3124,63 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(report_payload["report"]["status"], "mismatched")
         self.assertEqual(report_payload["report"]["version_mismatch_count"], report.version_mismatch_count)
         self.assertEqual(report_payload["report"]["state_mismatch_count"], 1)
+        self.assertEqual(report_payload["report"]["semantic_mismatch_count"], report.semantic_mismatch_count)
         self.assertEqual(report_payload["artifacts"]["csv_report_path"], report.csv_report_path)
         csv_payload = Path(report.csv_report_path).read_text(encoding="utf-8")
         self.assertIn("Injected summary mismatch for replay regression coverage.", csv_payload)
+
+    def test_replay_quality_summary_reports_baseline_coverage_and_pass_rates(self) -> None:
+        service = build_app_service()
+        self.addCleanup(service.close)
+
+        service.resolve_incident("incident-1", resolve_incident_command())
+        service.build_retrospective(retrospective_command(workflow_run_id="opsgraph-quality-summary-1"))
+        baseline = service.capture_replay_baseline(replay_baseline_capture_command())
+        replay = service.start_replay_run(replay_run_command())
+        executed = service.execute_replay_run(replay.replay_run_id)
+        baseline_state = service.get_workflow_state(baseline.workflow_run_id)
+        with service.runtime_stores.state_store.session_factory.begin() as session:
+            state_row = session.get(WorkflowStateRow, executed.workflow_run_id)
+            self.assertIsNotNone(state_row)
+            state_payload = dict(state_row.state_payload)
+            for key in (
+                "service_id",
+                "incident_status",
+                "current_fact_set_version",
+                "hypothesis_payloads",
+                "recommendation_payloads",
+                "comms_payloads",
+            ):
+                state_payload[key] = baseline_state.raw_state.get(key)
+            state_row.state_payload = state_payload
+        report = service.evaluate_replay_run(
+            replay.replay_run_id,
+            replay_evaluation_command(baseline_id=baseline.baseline_id),
+        )
+
+        summary = service.get_replay_quality_summary("ops-ws-1")
+        incident_summary = service.get_replay_quality_summary("ops-ws-1", "incident-1")
+
+        self.assertEqual(summary.incident_count, 1)
+        self.assertEqual(summary.replay_case_count, 1)
+        self.assertEqual(summary.replay_case_expected_output_count, 1)
+        self.assertEqual(summary.replay_case_expected_output_coverage_rate, 1.0)
+        self.assertEqual(summary.baseline_count, 1)
+        self.assertEqual(summary.baseline_incident_coverage_count, 1)
+        self.assertEqual(summary.baseline_coverage_rate, 1.0)
+        self.assertEqual(summary.evaluation_count, 1)
+        self.assertEqual(summary.matched_evaluation_count, 1)
+        self.assertEqual(summary.mismatched_evaluation_count, 0)
+        self.assertEqual(summary.replay_pass_rate, 1.0)
+        self.assertEqual(summary.avg_replay_score, report.score)
+        self.assertEqual(summary.semantic_evaluation_count, 1)
+        self.assertEqual(summary.avg_semantic_match_rate, report.semantic_match_rate)
+        self.assertEqual(summary.avg_top_hypothesis_hit_rate, 1.0)
+        self.assertEqual(summary.avg_recommendation_match_rate, 1.0)
+        self.assertEqual(summary.avg_comms_match_rate, 1.0)
+        self.assertEqual(summary.latest_report_id, report.report_id)
+        self.assertEqual(incident_summary.incident_id, "incident-1")
+        self.assertEqual(incident_summary.evaluation_count, 1)
 
     def test_evaluate_replay_requires_executed_run(self) -> None:
         service = build_app_service()
@@ -2136,6 +3280,13 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertIsNotNone(replay_case_row)
         self.assertEqual(replay_case_row.incident_id, "incident-1")
         self.assertEqual(replay_case_row.input_snapshot_payload["incident_id"], "incident-1")
+        self.assertIsInstance(replay_case_row.expected_output_payload, dict)
+        self.assertEqual(replay_case_row.expected_output_payload["incident"]["incident_id"], "incident-1")
+        self.assertEqual(
+            replay_case_row.expected_output_payload["workflow"]["current_state"],
+            "retrospective_completed",
+        )
+        self.assertTrue(replay_case_row.expected_output_payload["comms_drafts"])
         self.assertEqual(artifact_payload["incident_key"], "INC-2026-0001")
         self.assertIn("timeline", artifact_payload)
         self.assertIn("postmortem_markdown", artifact_payload)
@@ -2252,6 +3403,9 @@ class OpsGraphServiceTests(unittest.TestCase):
         self.assertEqual(replay_case.case_name, "INC-2026-0001 retrospective replay")
         self.assertEqual(replay_case.input_snapshot["incident_id"], "incident-1")
         self.assertEqual(replay_case.input_snapshot["target_channels"], ["internal_slack"])
+        self.assertIsNotNone(replay_case.expected_output)
+        self.assertEqual(replay_case.expected_output["incident"]["incident_key"], "INC-2026-0001")
+        self.assertTrue(replay_case.expected_output["recommendations"])
 
     def test_list_replays_can_filter_by_replay_case_id(self) -> None:
         service = build_app_service()

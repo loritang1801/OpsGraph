@@ -260,6 +260,8 @@ def _build_opsgraph_response_state(
             "confirmed_fact_refs": payload.get("confirmed_fact_refs", []),
             "service_id": payload.get("service_id", "service-1"),
             "top_hypothesis_refs": payload.get("top_hypothesis_refs", []),
+            "investigation_memory_context": payload.get("investigation_memory_context", []),
+            "recommendation_memory_context": payload.get("recommendation_memory_context", []),
             "target_channels": payload.get("target_channels", ["internal_slack"]),
             "channel_policy": payload.get("channel_policy", {"external_requires_approval": True}),
         },
@@ -290,6 +292,7 @@ def _build_opsgraph_retrospective_state(
             "confirmed_fact_refs": payload.get("confirmed_fact_refs", []),
             "timeline_refs": payload.get("timeline_refs", []),
             "resolution_summary": payload.get("resolution_summary", ""),
+            "postmortem_memory_context": payload.get("postmortem_memory_context", []),
         },
         overrides,
     )
@@ -757,6 +760,7 @@ def build_workflow_registry() -> WorkflowRegistry:
                         "context_missing_sources": state["context_missing_sources"],
                     },
                     database={"confirmed_fact_refs": state["confirmed_fact_refs"]},
+                    memory={"memory_context": state.get("investigation_memory_context", [])},
                 ),
                 "advise": lambda state: PromptAssemblySources(
                     workflow_state={
@@ -768,6 +772,7 @@ def build_workflow_registry() -> WorkflowRegistry:
                         "confirmed_fact_refs": state["confirmed_fact_refs"],
                         "top_hypothesis_refs": state["top_hypothesis_refs"],
                     },
+                    memory={"memory_context": state.get("recommendation_memory_context", [])},
                 ),
                 "communicate": lambda state: PromptAssemblySources(
                     workflow_state={
@@ -813,6 +818,7 @@ def build_workflow_registry() -> WorkflowRegistry:
                         "timeline_refs": state["timeline_refs"],
                         "resolution_summary": state["resolution_summary"],
                     },
+                    memory={"memory_context": state.get("postmortem_memory_context", [])},
                 )
             },
             initial_state_builder=_build_opsgraph_retrospective_state,

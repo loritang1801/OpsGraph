@@ -167,61 +167,67 @@ class OpsGraphDatabaseAdapter:
 
 
 class ContextBundleReaderAdapter:
-    def __init__(self, repository: SqlAlchemyOpsGraphRepository) -> None:
+    def __init__(
+        self,
+        repository: SqlAlchemyOpsGraphRepository,
+        *,
+        remote_provider: EnvConfiguredOpsGraphRemoteToolResolver | None = None,
+    ) -> None:
         self.repository = repository
+        self._remote_provider = remote_provider or EnvConfiguredOpsGraphRemoteToolResolver()
 
     def execute(self, *, tool, call, arguments):
         del call
+        payload = self.repository.read_context_bundle(
+            str(arguments.incident_id),
+            context_bundle_id=(
+                str(arguments.context_bundle_id)
+                if arguments.context_bundle_id not in {None, ""}
+                else None
+            ),
+        )
+        connection_id = None
         with self.repository.session_factory() as session:
-            incident_row = session.get(IncidentRow, arguments.incident_id)
-            if incident_row is None:
-                raise KeyError(arguments.incident_id)
-            fact_rows = session.scalars(
-                select(IncidentFactRow)
-                .where(IncidentFactRow.incident_id == incident_row.incident_id)
-                .where(IncidentFactRow.status == "confirmed")
-                .order_by(IncidentFactRow.created_at.asc())
-            ).all()
-            hypothesis_rows = session.scalars(
-                select(HypothesisRow)
-                .where(HypothesisRow.incident_id == incident_row.incident_id)
-                .where(HypothesisRow.status != "rejected")
-                .order_by(HypothesisRow.rank.asc(), HypothesisRow.updated_at.desc())
-            ).all()
-            refs = [{"kind": "incident_fact", "id": row.fact_id} for row in fact_rows[:3]]
-            refs.extend(
-                {"kind": "hypothesis", "id": row.hypothesis_id}
-                for row in hypothesis_rows[:2]
+            incident_row = session.get(IncidentRow, str(arguments.incident_id))
+        if incident_row is not None:
+            remote_result = self._remote_provider.fetch_change_context(
+                service_id=incident_row.service_name,
+                incident_id=incident_row.incident_id,
+                limit=3,
             )
-            deployment_ids = []
-            for row in fact_rows:
-                deployment_ids.extend(_extract_deployment_ids(row.source_refs))
-            refs.extend({"kind": "deployment", "id": deployment_id} for deployment_id in deployment_ids[:2])
-            missing_sources: list[str] = []
-            if not deployment_ids:
-                missing_sources.append("deployment_history")
-            if not hypothesis_rows:
-                missing_sources.append("prior_hypotheses")
-            summary_parts = [incident_row.title]
-            if fact_rows:
-                summary_parts.append(fact_rows[0].statement)
-            if hypothesis_rows:
-                summary_parts.append(hypothesis_rows[0].title)
-            return {
-                "status": "success",
-                "normalized_payload": {
-                    "context_bundle_id": str(arguments.context_bundle_id or f"context-{incident_row.incident_id}"),
-                    "summary": " ".join(part for part in summary_parts if part),
-                    "missing_sources": missing_sources,
-                    "refs": refs[:6],
-                },
-                "provenance": {
-                    "adapter_type": tool.adapter_type,
-                    "fetched_at": _utcnow_iso(),
-                    "source_locator": f"opsgraph://incidents/{incident_row.incident_id}/context",
-                },
-                "warnings": [],
-            }
+            if remote_result is not None:
+                connection_id = remote_result.connection_id
+                changes = [
+                    dict(item)
+                    for item in remote_result.normalized_payload.get("changes", [])
+                    if isinstance(item, dict)
+                ]
+                if changes:
+                    payload["refs"] = list(payload.get("refs", [])) + [
+                        {"kind": "change_ticket", "id": str(item.get("ticket_ref") or item.get("change_id"))}
+                        for item in changes
+                        if item.get("ticket_ref") or item.get("change_id")
+                    ]
+                    payload["summary"] = (
+                        f"{payload['summary']} Recent changes: "
+                        + "; ".join(
+                            str(item.get("summary") or item.get("ticket_ref") or item.get("change_id"))
+                            for item in changes[:2]
+                        )
+                    ).strip()
+                else:
+                    payload["missing_sources"] = list(payload.get("missing_sources", [])) + ["change_tracking"]
+        return {
+            "status": "success",
+            "normalized_payload": payload,
+            "provenance": {
+                "adapter_type": tool.adapter_type,
+                "fetched_at": _utcnow_iso(),
+                "source_locator": f"opsgraph://incidents/{arguments.incident_id}/context",
+                "connection_id": connection_id,
+            },
+            "warnings": [],
+        }
 
 
 class GitHubDeploymentAdapter:
@@ -538,8 +544,12 @@ class ApprovalStoreAdapter:
 
 def register_opsgraph_product_tool_adapters(tool_executor, repository: SqlAlchemyOpsGraphRepository) -> None:
     remote_provider = EnvConfiguredOpsGraphRemoteToolResolver()
+    repository.remote_tool_resolver = remote_provider
     tool_executor.register_adapter("opsgraph_database", OpsGraphDatabaseAdapter(repository))
-    tool_executor.register_adapter("context_bundle_reader", ContextBundleReaderAdapter(repository))
+    tool_executor.register_adapter(
+        "context_bundle_reader",
+        ContextBundleReaderAdapter(repository, remote_provider=remote_provider),
+    )
     tool_executor.register_adapter("github", GitHubDeploymentAdapter(repository, remote_provider=remote_provider))
     tool_executor.register_adapter("service_registry", ServiceRegistryAdapter(repository, remote_provider=remote_provider))
     tool_executor.register_adapter("vector_store", RunbookSearchAdapter(repository, remote_provider=remote_provider))
@@ -601,6 +611,22 @@ def describe_opsgraph_product_tool_capabilities(tool_executor=None) -> dict[str,
                 "scope": "channel_constraints",
             },
         },
+        "change_context": {
+            "adapter_type": "context_bundle_reader",
+            "backend_id": "repository-context-only",
+            "details": {
+                "tool_names": ["context_bundle.read"],
+                "scope": "change_tracking",
+            },
+        },
+        "comms_publish": {
+            "adapter_type": "channel_policy",
+            "backend_id": "local-publish-fallback",
+            "details": {
+                "tool_names": ["incident.publish_comms"],
+                "scope": "external_channel_delivery",
+            },
+        },
         "approval_store": {
             "adapter_type": "approval_store",
             "backend_id": "sqlalchemy-approval-store",
@@ -642,6 +668,18 @@ def describe_opsgraph_product_tool_capabilities(tool_executor=None) -> dict[str,
                 "service_registry",
                 local_backend_id="heuristic-service-registry",
                 remote_backend_id="http-service-registry-provider",
+            )
+        elif key == "change_context":
+            descriptor = resolver.describe_capability(
+                "change_context",
+                local_backend_id="repository-context-only",
+                remote_backend_id="http-change-context-provider",
+            )
+        elif key == "comms_publish":
+            descriptor = resolver.describe_capability(
+                "comms_publish",
+                local_backend_id="local-publish-fallback",
+                remote_backend_id="http-comms-publish-provider",
             )
         else:
             descriptor = shared_platform.RuntimeCapabilityDescriptor(

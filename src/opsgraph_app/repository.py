@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, select
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -35,6 +36,8 @@ from .api_models import (
     ReplayBaselineSummary,
     ReplayAdminAuditLogSummary,
     ReplayEvaluationSummary,
+    ReplaySemanticCheckSummary,
+    RemoteProviderSmokeRunRecord,
     ReplayWorkerMonitorDefaultPresetResponse,
     ReplayWorkerMonitorResolvedShiftResponse,
     ReplayWorkerMonitorShiftDateRangeOverride,
@@ -59,6 +62,13 @@ from .api_models import (
     SignalSummary,
     SeverityOverrideCommand,
     TimelineEventSummary,
+)
+from .connectors import EnvConfiguredOpsGraphRemoteToolResolver
+from .repository_runtime_diagnostics import (
+    list_remote_provider_smoke_runs as runtime_diag_list_remote_provider_smoke_runs,
+    list_replay_admin_audit_logs as runtime_diag_list_replay_admin_audit_logs,
+    record_remote_provider_smoke_run as runtime_diag_record_remote_provider_smoke_run,
+    record_replay_admin_audit_log as runtime_diag_record_replay_admin_audit_log,
 )
 
 
@@ -103,6 +113,23 @@ class OpsGraphRepository(Protocol):
         request_payload: dict[str, object] | None = None,
         result_payload: dict[str, object] | None = None,
     ) -> ReplayAdminAuditLogSummary: ...
+
+    def list_remote_provider_smoke_runs(
+        self,
+        *,
+        limit: int = 10,
+        actor_user_id: str | None = None,
+        request_id: str | None = None,
+        provider: str | None = None,
+    ) -> list[RemoteProviderSmokeRunRecord]: ...
+
+    def record_remote_provider_smoke_run(
+        self,
+        *,
+        request_payload: dict[str, object],
+        response_payload: dict[str, object],
+        actor_context: dict[str, object] | None = None,
+    ) -> RemoteProviderSmokeRunRecord: ...
 
     def list_hypotheses(self, incident_id: str) -> list[HypothesisSummary]: ...
 
@@ -227,6 +254,8 @@ class OpsGraphRepository(Protocol):
     ) -> ReplayRunSummary: ...
 
     def get_incident_execution_seed(self, incident_id: str) -> dict[str, object]: ...
+
+    def get_postmortem_memory_context(self, incident_id: str) -> list[dict[str, object]]: ...
 
     def record_replay_baseline(
         self,
@@ -511,6 +540,7 @@ class CommsDraftRow(Base):
     fact_set_version: Mapped[int] = mapped_column(Integer)
     approval_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     published_message_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
 
@@ -568,6 +598,20 @@ class ReplayAdminAuditLogRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
 
 
+class RemoteProviderSmokeRunRow(Base):
+    __tablename__ = "opsgraph_remote_provider_smoke_run"
+
+    diagnostic_run_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    actor_type: Mapped[str] = mapped_column(String(30), default="system")
+    actor_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    actor_role: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    request_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    response_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
+
+
 class SignalIndexRow(Base):
     __tablename__ = "opsgraph_signal_index"
 
@@ -585,6 +629,39 @@ class SignalRow(Base):
     title: Mapped[str] = mapped_column(String(255))
     dedupe_key: Mapped[str] = mapped_column(String(255), index=True)
     fired_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class ContextBundleRow(Base):
+    __tablename__ = "opsgraph_context_bundle"
+
+    context_bundle_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    ops_workspace_id: Mapped[str] = mapped_column(String(255), index=True)
+    service_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    fact_set_version: Mapped[int] = mapped_column(Integer, index=True)
+    summary: Mapped[str] = mapped_column(Text)
+    missing_sources: Mapped[list[str]] = mapped_column(JSON, default=list)
+    refs: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    source_workflow_run_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class MemoryRecordRow(Base):
+    __tablename__ = "opsgraph_memory_record"
+
+    memory_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    ops_workspace_id: Mapped[str] = mapped_column(String(255), index=True)
+    incident_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    service_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    team_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    memory_scope: Mapped[str] = mapped_column(String(30), index=True)
+    memory_type: Mapped[str] = mapped_column(String(80), index=True)
+    summary: Mapped[str] = mapped_column(Text)
+    details_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_workflow_run_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
 
 
 class ArtifactBlobRow(Base):
@@ -783,6 +860,7 @@ class SqlAlchemyOpsGraphRepository:
     def __init__(self, session_factory: sessionmaker[Session], engine: Engine) -> None:
         self.session_factory = session_factory
         self.engine = engine
+        self.remote_tool_resolver = EnvConfiguredOpsGraphRemoteToolResolver()
         create_opsgraph_tables(engine)
         self.seed_if_empty()
 
@@ -875,6 +953,36 @@ class SqlAlchemyOpsGraphRepository:
                     fact_set_version=1,
                     approval_task_id=None,
                     published_message_ref=None,
+                    published_at=None,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                ArtifactBlobRow(
+                    artifact_id=self._comms_artifact_id("draft-1"),
+                    artifact_type="opsgraph_comms_draft",
+                    content_text=json.dumps(
+                        {
+                            "draft_id": "draft-1",
+                            "incident_id": "incident-1",
+                            "channel": "internal_slack",
+                            "title": "Checkout API incident update",
+                            "fact_set_version": 1,
+                            "body_markdown": (
+                                "We are investigating elevated 5xx errors on checkout-api. "
+                                "Rollback restored availability and we are monitoring recovery."
+                            ),
+                            "fact_refs": [{"kind": "incident_fact", "id": "fact-1"}],
+                        },
+                        sort_keys=True,
+                    ),
+                    metadata_payload={
+                        "draft_id": "draft-1",
+                        "incident_id": "incident-1",
+                        "channel": "internal_slack",
+                        "fact_set_version": 1,
+                    },
                     created_at=created_at,
                     updated_at=created_at,
                 )
@@ -904,6 +1012,132 @@ class SqlAlchemyOpsGraphRepository:
                 )
             )
             session.add(SignalIndexRow(correlation_key="checkout-api:high-error-rate", incident_id="incident-1"))
+            session.add(
+                ContextBundleRow(
+                    context_bundle_id="context-incident-1-v1",
+                    incident_id="incident-1",
+                    ops_workspace_id="ops-ws-1",
+                    service_id="checkout-api",
+                    fact_set_version=1,
+                    summary=(
+                        "Checkout API elevated 5xx rate. "
+                        "Rollback restored checkout availability. "
+                        "Latest checkout deployment exhausted database connections."
+                    ),
+                    missing_sources=[],
+                    refs=[
+                        {"kind": "incident_fact", "id": "fact-1"},
+                        {"kind": "hypothesis", "id": "hypothesis-1"},
+                        {"kind": "deployment", "id": "deploy-123"},
+                    ],
+                    source_workflow_run_id=None,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                MemoryRecordRow(
+                    memory_id="memory-incident-incident-1-v1",
+                    ops_workspace_id="ops-ws-1",
+                    incident_id="incident-1",
+                    service_id="checkout-api",
+                    team_key="payments-sre",
+                    memory_scope="incident",
+                    memory_type="incident_short_term",
+                    summary=(
+                        "Checkout API elevated 5xx rate with rollback already identified as the leading mitigation."
+                    ),
+                    details_payload={
+                        "fact_set_version": 1,
+                        "context_bundle_id": "context-incident-1-v1",
+                        "fact_refs": [{"kind": "incident_fact", "id": "fact-1"}],
+                    },
+                    source_workflow_run_id=None,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                MemoryRecordRow(
+                    memory_id="memory-service-pattern-incident-1-v1",
+                    ops_workspace_id="ops-ws-1",
+                    incident_id="incident-1",
+                    service_id="checkout-api",
+                    team_key="payments-sre",
+                    memory_scope="service",
+                    memory_type="incident_pattern",
+                    summary="Checkout incidents often correlate with a recent deployment and database saturation.",
+                    details_payload={
+                        "incident_key": "INC-2026-0001",
+                        "context_bundle_id": "context-incident-1-v1",
+                    },
+                    source_workflow_run_id=None,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                MemoryRecordRow(
+                    memory_id="memory-team-pattern-incident-1-v1",
+                    ops_workspace_id="ops-ws-1",
+                    incident_id="incident-1",
+                    service_id="checkout-api",
+                    team_key="payments-sre",
+                    memory_scope="team",
+                    memory_type="incident_pattern",
+                    summary="Payments SRE incidents should check recent deploys before expanding the blast radius.",
+                    details_payload={
+                        "incident_key": "INC-2026-0001",
+                        "service_id": "checkout-api",
+                    },
+                    source_workflow_run_id=None,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                MemoryRecordRow(
+                    memory_id="memory-service-mitigation-incident-1-v1",
+                    ops_workspace_id="ops-ws-1",
+                    incident_id="incident-1",
+                    service_id="checkout-api",
+                    team_key="payments-sre",
+                    memory_scope="service",
+                    memory_type="successful_mitigation",
+                    summary="Rollback deploy-123 restored checkout availability after database connection exhaustion.",
+                    details_payload={
+                        "recommendation_title": "Rollback latest checkout deployment",
+                        "instructions_markdown": "Rollback deploy-123 and monitor connection pool recovery.",
+                    },
+                    source_workflow_run_id=None,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.add(
+                MemoryRecordRow(
+                    memory_id="memory-postmortem-style-ops-ws-1",
+                    ops_workspace_id="ops-ws-1",
+                    incident_id=None,
+                    service_id=None,
+                    team_key=None,
+                    memory_scope="workspace",
+                    memory_type="postmortem_style",
+                    summary="Write concise postmortems with impact, timeline, root cause, mitigation, and follow-up actions.",
+                    details_payload={
+                        "preferred_sections": [
+                            "impact",
+                            "timeline",
+                            "root_cause",
+                            "mitigation",
+                            "follow_up_actions",
+                        ]
+                    },
+                    source_workflow_run_id=None,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
 
     @staticmethod
     def _json_payload(value: dict[str, object] | None) -> dict[str, object]:
@@ -965,6 +1199,620 @@ class SqlAlchemyOpsGraphRepository:
         if channel == "internal_slack":
             return f"{incident_title} internal update"
         return f"{incident_title} {channel} update"
+
+    @staticmethod
+    def _comms_artifact_id(draft_id: str) -> str:
+        return f"artifact-comms-{draft_id}"
+
+    @staticmethod
+    def _owner_team_for_service(service_id: str | None) -> str | None:
+        normalized = (service_id or "").strip()
+        if not normalized:
+            return None
+        if "checkout" in normalized or "payments" in normalized:
+            return "payments-sre"
+        if "catalog" in normalized:
+            return "commerce-platform"
+        prefix = normalized.split("-", 1)[0]
+        return f"{prefix}-team" if prefix else None
+
+    @classmethod
+    def _context_bundle_identifier(cls, incident_id: str, fact_set_version: int) -> str:
+        return f"context-{incident_id}-v{fact_set_version}"
+
+    @classmethod
+    def _memory_record_payload(cls, row: MemoryRecordRow) -> dict[str, object]:
+        updated_at = cls._normalize_timestamp(row.updated_at)
+        return {
+            "memory_id": row.memory_id,
+            "scope": row.memory_scope,
+            "memory_type": row.memory_type,
+            "summary": row.summary,
+            "incident_id": row.incident_id,
+            "service_id": row.service_id,
+            "team_key": row.team_key,
+            "details": dict(row.details_payload or {}),
+            "updated_at": (
+                updated_at.replace(tzinfo=UTC).isoformat().replace("+00:00", "Z")
+                if updated_at is not None
+                else None
+            ),
+        }
+
+    @classmethod
+    def _build_context_bundle_payload(
+        cls,
+        incident_row: IncidentRow,
+        fact_rows: list[IncidentFactRow],
+        hypothesis_rows: list[HypothesisRow],
+    ) -> tuple[str, list[str], list[dict[str, object]]]:
+        refs: list[dict[str, object]] = [
+            {"kind": "incident_fact", "id": row.fact_id}
+            for row in fact_rows[:3]
+        ]
+        refs.extend(
+            {"kind": "hypothesis", "id": row.hypothesis_id}
+            for row in hypothesis_rows[:2]
+        )
+        deployment_ids: list[str] = []
+        for row in fact_rows:
+            for ref in row.source_refs or []:
+                if not isinstance(ref, dict):
+                    continue
+                if str(ref.get("kind") or "") == "deployment" and ref.get("id") is not None:
+                    deployment_ids.append(str(ref["id"]))
+        seen_deployments: set[str] = set()
+        for deployment_id in deployment_ids:
+            if deployment_id in seen_deployments:
+                continue
+            seen_deployments.add(deployment_id)
+            refs.append({"kind": "deployment", "id": deployment_id})
+        missing_sources: list[str] = []
+        if not deployment_ids:
+            missing_sources.append("deployment_history")
+        if not hypothesis_rows:
+            missing_sources.append("prior_hypotheses")
+        summary_parts = [incident_row.title]
+        if fact_rows:
+            summary_parts.append(fact_rows[0].statement)
+        if hypothesis_rows:
+            summary_parts.append(hypothesis_rows[0].title)
+        summary = " ".join(part for part in summary_parts if part).strip()
+        if not summary:
+            summary = f"Incident context for {incident_row.incident_id}"
+        return summary, missing_sources, refs[:6]
+
+    def _upsert_context_bundle(
+        self,
+        session: Session,
+        incident_row: IncidentRow,
+        *,
+        context_bundle_id: str | None = None,
+        source_workflow_run_id: str | None = None,
+    ) -> ContextBundleRow:
+        fact_rows = session.scalars(
+            select(IncidentFactRow)
+            .where(IncidentFactRow.incident_id == incident_row.incident_id)
+            .where(IncidentFactRow.status == "confirmed")
+            .order_by(IncidentFactRow.created_at.asc())
+        ).all()
+        hypothesis_rows = session.scalars(
+            select(HypothesisRow)
+            .where(HypothesisRow.incident_id == incident_row.incident_id)
+            .where(HypothesisRow.status != "rejected")
+            .order_by(HypothesisRow.rank.asc(), HypothesisRow.updated_at.desc())
+        ).all()
+        resolved_id = context_bundle_id or self._context_bundle_identifier(
+            incident_row.incident_id,
+            incident_row.current_fact_set_version,
+        )
+        existing = session.get(ContextBundleRow, resolved_id)
+        summary, missing_sources, refs = self._build_context_bundle_payload(
+            incident_row,
+            fact_rows,
+            hypothesis_rows,
+        )
+        now = self._utcnow_naive()
+        if existing is None:
+            existing = ContextBundleRow(
+                context_bundle_id=resolved_id,
+                incident_id=incident_row.incident_id,
+                ops_workspace_id=incident_row.ops_workspace_id,
+                service_id=incident_row.service_name,
+                fact_set_version=incident_row.current_fact_set_version,
+                summary=summary,
+                missing_sources=missing_sources,
+                refs=refs,
+                source_workflow_run_id=source_workflow_run_id,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(existing)
+            return existing
+        existing.ops_workspace_id = incident_row.ops_workspace_id
+        existing.service_id = incident_row.service_name
+        existing.fact_set_version = incident_row.current_fact_set_version
+        existing.summary = summary
+        existing.missing_sources = missing_sources
+        existing.refs = refs
+        existing.source_workflow_run_id = source_workflow_run_id or existing.source_workflow_run_id
+        existing.updated_at = now
+        return existing
+
+    def _resolve_context_bundle_row(
+        self,
+        session: Session,
+        incident_row: IncidentRow,
+        *,
+        context_bundle_id: str | None,
+    ) -> ContextBundleRow:
+        if context_bundle_id not in {None, ""}:
+            existing = session.get(ContextBundleRow, str(context_bundle_id))
+            if existing is not None and existing.incident_id == incident_row.incident_id:
+                return existing
+        preferred = session.scalars(
+            select(ContextBundleRow)
+            .where(ContextBundleRow.incident_id == incident_row.incident_id)
+            .order_by(ContextBundleRow.fact_set_version.desc(), ContextBundleRow.updated_at.desc())
+            .limit(1)
+        ).first()
+        if preferred is not None:
+            return preferred
+        return self._upsert_context_bundle(
+            session,
+            incident_row,
+            context_bundle_id=(
+                str(context_bundle_id)
+                if context_bundle_id not in {None, ""}
+                else None
+            ),
+        )
+
+    def _merge_memory_record(
+        self,
+        session: Session,
+        *,
+        memory_id: str,
+        ops_workspace_id: str,
+        incident_id: str | None,
+        service_id: str | None,
+        team_key: str | None,
+        memory_scope: str,
+        memory_type: str,
+        summary: str,
+        details_payload: dict[str, object] | None,
+        source_workflow_run_id: str | None,
+        updated_at: datetime | None = None,
+    ) -> MemoryRecordRow:
+        now = updated_at or self._utcnow_naive()
+        row = session.get(MemoryRecordRow, memory_id)
+        if row is None:
+            row = MemoryRecordRow(
+                memory_id=memory_id,
+                ops_workspace_id=ops_workspace_id,
+                incident_id=incident_id,
+                service_id=service_id,
+                team_key=team_key,
+                memory_scope=memory_scope,
+                memory_type=memory_type,
+                summary=summary,
+                details_payload=self._json_payload(details_payload),
+                source_workflow_run_id=source_workflow_run_id,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            return row
+        row.ops_workspace_id = ops_workspace_id
+        row.incident_id = incident_id
+        row.service_id = service_id
+        row.team_key = team_key
+        row.memory_scope = memory_scope
+        row.memory_type = memory_type
+        row.summary = summary
+        row.details_payload = self._json_payload(details_payload)
+        row.source_workflow_run_id = source_workflow_run_id or row.source_workflow_run_id
+        row.updated_at = now
+        return row
+
+    def _persist_incident_memory(
+        self,
+        session: Session,
+        incident_row: IncidentRow,
+        *,
+        context_bundle: ContextBundleRow,
+        workflow_run_id: str,
+        hypothesis_ids: list[str],
+    ) -> None:
+        team_key = self._owner_team_for_service(incident_row.service_name)
+        shared_details = {
+            "incident_id": incident_row.incident_id,
+            "fact_set_version": incident_row.current_fact_set_version,
+            "context_bundle_id": context_bundle.context_bundle_id,
+            "hypothesis_ids": hypothesis_ids,
+        }
+        self._merge_memory_record(
+            session,
+            memory_id=f"memory-incident-{incident_row.incident_id}-v{incident_row.current_fact_set_version}",
+            ops_workspace_id=incident_row.ops_workspace_id,
+            incident_id=incident_row.incident_id,
+            service_id=incident_row.service_name,
+            team_key=team_key,
+            memory_scope="incident",
+            memory_type="incident_short_term",
+            summary=context_bundle.summary,
+            details_payload=shared_details,
+            source_workflow_run_id=workflow_run_id,
+        )
+        self._merge_memory_record(
+            session,
+            memory_id=f"memory-service-pattern-{incident_row.incident_id}-v{incident_row.current_fact_set_version}",
+            ops_workspace_id=incident_row.ops_workspace_id,
+            incident_id=incident_row.incident_id,
+            service_id=incident_row.service_name,
+            team_key=team_key,
+            memory_scope="service",
+            memory_type="incident_pattern",
+            summary=context_bundle.summary,
+            details_payload=shared_details,
+            source_workflow_run_id=workflow_run_id,
+        )
+        if team_key is not None:
+            self._merge_memory_record(
+                session,
+                memory_id=f"memory-team-pattern-{incident_row.incident_id}-v{incident_row.current_fact_set_version}",
+                ops_workspace_id=incident_row.ops_workspace_id,
+                incident_id=incident_row.incident_id,
+                service_id=incident_row.service_name,
+                team_key=team_key,
+                memory_scope="team",
+                memory_type="incident_pattern",
+                summary=context_bundle.summary,
+                details_payload=shared_details,
+                source_workflow_run_id=workflow_run_id,
+            )
+
+    def _persist_successful_mitigation_memory(
+        self,
+        session: Session,
+        incident_row: IncidentRow,
+        *,
+        resolution_summary: str,
+        root_cause_fact_ids: list[str],
+        source_workflow_run_id: str | None,
+    ) -> None:
+        team_key = self._owner_team_for_service(incident_row.service_name)
+        recommendation_row = session.scalars(
+            select(RecommendationRow)
+            .where(RecommendationRow.incident_id == incident_row.incident_id)
+            .where(RecommendationRow.status.in_(("approved", "executed")))
+            .order_by(RecommendationRow.updated_at.desc())
+            .limit(1)
+        ).first()
+        details = {
+            "incident_id": incident_row.incident_id,
+            "root_cause_fact_ids": list(root_cause_fact_ids),
+            "recommendation_id": (
+                recommendation_row.recommendation_id
+                if recommendation_row is not None
+                else None
+            ),
+            "recommendation_title": (
+                recommendation_row.title
+                if recommendation_row is not None
+                else None
+            ),
+            "instructions_markdown": (
+                recommendation_row.instructions_markdown
+                if recommendation_row is not None
+                else None
+            ),
+        }
+        self._merge_memory_record(
+            session,
+            memory_id=f"memory-service-mitigation-{incident_row.incident_id}-v{incident_row.current_fact_set_version}",
+            ops_workspace_id=incident_row.ops_workspace_id,
+            incident_id=incident_row.incident_id,
+            service_id=incident_row.service_name,
+            team_key=team_key,
+            memory_scope="service",
+            memory_type="successful_mitigation",
+            summary=resolution_summary,
+            details_payload=details,
+            source_workflow_run_id=source_workflow_run_id,
+        )
+
+    def _persist_postmortem_style_memory(
+        self,
+        session: Session,
+        incident_row: IncidentRow,
+        *,
+        postmortem_output: dict[str, object] | None,
+        source_workflow_run_id: str | None,
+        finalized_by_user_id: str | None = None,
+    ) -> None:
+        follow_up_actions = self._structured_items(postmortem_output, "follow_up_actions")
+        replay_capture_hints = [
+            str(item)
+            for item in (
+                postmortem_output.get("replay_capture_hints")
+                if isinstance(postmortem_output, dict)
+                and isinstance(postmortem_output.get("replay_capture_hints"), list)
+                else []
+            )
+            if item
+        ]
+        summary = (
+            "Prefer grounded postmortems with impact, timeline, root cause, mitigation, and explicit follow-up actions."
+        )
+        self._merge_memory_record(
+            session,
+            memory_id=f"memory-postmortem-style-{incident_row.ops_workspace_id}",
+            ops_workspace_id=incident_row.ops_workspace_id,
+            incident_id=incident_row.incident_id,
+            service_id=incident_row.service_name,
+            team_key=self._owner_team_for_service(incident_row.service_name),
+            memory_scope="workspace",
+            memory_type="postmortem_style",
+            summary=summary,
+            details_payload={
+                "follow_up_action_count": len(follow_up_actions),
+                "replay_hint_count": len(replay_capture_hints),
+                "finalized_by_user_id": finalized_by_user_id,
+                "preferred_sections": [
+                    "impact",
+                    "timeline",
+                    "root_cause",
+                    "mitigation",
+                    "follow_up_actions",
+                ],
+            },
+            source_workflow_run_id=source_workflow_run_id,
+        )
+
+    def _list_memory_payloads(
+        self,
+        session: Session,
+        *,
+        incident_row: IncidentRow,
+        scopes: tuple[str, ...],
+        memory_types: tuple[str, ...],
+        include_current_incident: bool = True,
+        limit: int = 6,
+    ) -> list[dict[str, object]]:
+        stmt = (
+            select(MemoryRecordRow)
+            .where(MemoryRecordRow.ops_workspace_id == incident_row.ops_workspace_id)
+            .where(MemoryRecordRow.memory_scope.in_(scopes))
+            .where(MemoryRecordRow.memory_type.in_(memory_types))
+        )
+        filters = []
+        if incident_row.service_name:
+            filters.append(MemoryRecordRow.service_id == incident_row.service_name)
+        team_key = self._owner_team_for_service(incident_row.service_name)
+        if team_key is not None:
+            filters.append(MemoryRecordRow.team_key == team_key)
+        if include_current_incident:
+            filters.append(MemoryRecordRow.incident_id == incident_row.incident_id)
+        elif incident_row.incident_id:
+            stmt = stmt.where(
+                (MemoryRecordRow.incident_id != incident_row.incident_id)
+                | (MemoryRecordRow.incident_id.is_(None))
+            )
+        if filters:
+            stmt = stmt.where(or_(*filters))
+        rows = session.scalars(
+            stmt.order_by(MemoryRecordRow.updated_at.desc(), MemoryRecordRow.memory_id.desc()).limit(limit)
+        ).all()
+        return [self._memory_record_payload(row) for row in rows]
+
+    @staticmethod
+    def _infer_service_name(correlation_key: str, summary: str) -> str:
+        if ":" in correlation_key:
+            prefix = correlation_key.split(":", 1)[0].strip().lower()
+            if prefix:
+                return prefix
+        summary_match = re.search(r"\b([a-z0-9-]+(?:\s+[a-z0-9-]+)?)\s+api\b", summary.lower())
+        if summary_match is not None:
+            return summary_match.group(1).strip().replace(" ", "-")
+        tokens = re.findall(r"[a-z0-9][a-z0-9-]{1,}", summary.lower())
+        return tokens[0] if tokens else "unknown-service"
+
+    @staticmethod
+    def _signal_feature_tokens(
+        *,
+        correlation_key: str,
+        summary: str,
+        source: str,
+        service_name: str,
+    ) -> set[str]:
+        stopwords = {
+            "api",
+            "alert",
+            "alerts",
+            "firing",
+            "source",
+            "grafana",
+            "prometheus",
+            "service",
+            "rate",
+            "elevated",
+            "high",
+            "the",
+            "and",
+            "for",
+            "with",
+        }
+        raw_tokens = re.findall(
+            r"[a-z0-9][a-z0-9-]{1,}",
+            f"{correlation_key.lower()} {summary.lower()} {source.lower()}",
+        )
+        service_parts = {part for part in service_name.lower().split("-") if part}
+        normalized: set[str] = set()
+        for token in raw_tokens:
+            if token in stopwords:
+                continue
+            normalized.add(token)
+            for part in token.split("-"):
+                if len(part) < 3 or part in stopwords or part in service_parts:
+                    continue
+                normalized.add(part)
+        return normalized
+
+    @classmethod
+    def _incident_accepts_signal(
+        cls,
+        incident_row: IncidentRow,
+        observed_at: datetime,
+        *,
+        window: timedelta,
+    ) -> bool:
+        if incident_row.incident_status == "closed":
+            return False
+        candidate_timestamp = cls._normalize_timestamp(incident_row.updated_at) or cls._normalize_timestamp(
+            incident_row.opened_at
+        )
+        if candidate_timestamp is None:
+            return True
+        return abs(observed_at - candidate_timestamp) <= window
+
+    def _find_aggregate_incident(
+        self,
+        session: Session,
+        *,
+        ops_workspace_id: str,
+        service_name: str,
+        correlation_key: str,
+        summary: str,
+        observed_at: datetime,
+        source: str,
+    ) -> IncidentRow | None:
+        correlation_mapping = session.get(SignalIndexRow, correlation_key)
+        aggregate_window = timedelta(hours=2)
+        if correlation_mapping is not None:
+            mapped_incident = session.get(IncidentRow, correlation_mapping.incident_id)
+            if (
+                mapped_incident is not None
+                and mapped_incident.ops_workspace_id == ops_workspace_id
+                and self._incident_accepts_signal(mapped_incident, observed_at, window=aggregate_window)
+            ):
+                return mapped_incident
+
+        alert_tokens = self._signal_feature_tokens(
+            correlation_key=correlation_key,
+            summary=summary,
+            source=source,
+            service_name=service_name,
+        )
+        candidates = session.scalars(
+            select(IncidentRow)
+            .where(IncidentRow.ops_workspace_id == ops_workspace_id)
+            .where(IncidentRow.service_name == service_name)
+            .where(IncidentRow.incident_status != "closed")
+            .order_by(IncidentRow.updated_at.desc(), IncidentRow.opened_at.desc())
+        ).all()
+        best_match: IncidentRow | None = None
+        best_score = 0
+        for candidate in candidates:
+            if not self._incident_accepts_signal(candidate, observed_at, window=aggregate_window):
+                continue
+            candidate_signals = session.scalars(
+                select(SignalRow)
+                .where(SignalRow.incident_id == candidate.incident_id)
+                .order_by(SignalRow.fired_at.desc())
+                .limit(8)
+            ).all()
+            candidate_tokens: set[str] = set()
+            exact_key_match = False
+            source_match = False
+            for signal in candidate_signals:
+                if signal.dedupe_key == correlation_key:
+                    exact_key_match = True
+                if signal.source == source:
+                    source_match = True
+                candidate_tokens.update(
+                    self._signal_feature_tokens(
+                        correlation_key=signal.dedupe_key,
+                        summary=signal.title,
+                        source=signal.source,
+                        service_name=candidate.service_name,
+                    )
+                )
+            overlap = alert_tokens & candidate_tokens
+            score = 0
+            if exact_key_match:
+                score += 6
+            if len(overlap) >= 3:
+                score += 4
+            elif len(overlap) >= 1:
+                score += 2
+            if source_match:
+                score += 1
+            candidate_timestamp = self._normalize_timestamp(candidate.updated_at) or self._normalize_timestamp(
+                candidate.opened_at
+            )
+            if candidate_timestamp is not None:
+                delta = abs(observed_at - candidate_timestamp)
+                if delta <= timedelta(minutes=15):
+                    score += 2
+                elif delta <= timedelta(hours=1):
+                    score += 1
+            if candidate.incident_status in {"investigating", "responding"}:
+                score += 1
+            if score > best_score:
+                best_match = candidate
+                best_score = score
+        return best_match if best_score >= 3 else None
+
+    def _merge_comms_artifact(
+        self,
+        session: Session,
+        *,
+        draft_id: str,
+        incident_id: str,
+        channel: str,
+        title: str,
+        fact_set_version: int,
+        body_markdown: str,
+        fact_refs: list[dict[str, object]],
+        created_at: datetime,
+    ) -> None:
+        session.merge(
+            ArtifactBlobRow(
+                artifact_id=self._comms_artifact_id(draft_id),
+                artifact_type="opsgraph_comms_draft",
+                content_text=json.dumps(
+                    {
+                        "draft_id": draft_id,
+                        "incident_id": incident_id,
+                        "channel": channel,
+                        "title": title,
+                        "fact_set_version": fact_set_version,
+                        "body_markdown": body_markdown,
+                        "fact_refs": fact_refs,
+                    },
+                    sort_keys=True,
+                ),
+                metadata_payload={
+                    "draft_id": draft_id,
+                    "incident_id": incident_id,
+                    "channel": channel,
+                    "fact_set_version": fact_set_version,
+                },
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+
+    def _load_comms_artifact_payload(self, session: Session, draft_id: str) -> dict[str, object]:
+        artifact_row = session.get(ArtifactBlobRow, self._comms_artifact_id(draft_id))
+        if artifact_row is None:
+            return {}
+        try:
+            payload = json.loads(artifact_row.content_text)
+        except json.JSONDecodeError:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
 
     def _timeline_event(
         self,
@@ -1164,6 +2012,7 @@ class SqlAlchemyOpsGraphRepository:
             fact_set_version=row.fact_set_version,
             approval_task_id=row.approval_task_id,
             published_message_ref=row.published_message_ref,
+            published_at=row.published_at,
             created_at=row.created_at,
         )
 
@@ -1220,6 +2069,23 @@ class SqlAlchemyOpsGraphRepository:
         )
 
     @staticmethod
+    def _to_remote_provider_smoke_run(row: RemoteProviderSmokeRunRow) -> RemoteProviderSmokeRunRecord:
+        response_payload = dict(row.response_payload or {})
+        response_payload.setdefault("diagnostic_run_id", row.diagnostic_run_id)
+        response_payload.setdefault("created_at", row.created_at)
+        return RemoteProviderSmokeRunRecord(
+            diagnostic_run_id=row.diagnostic_run_id,
+            actor_type=row.actor_type,
+            actor_user_id=row.actor_user_id,
+            actor_role=row.actor_role,
+            session_id=row.session_id,
+            request_id=row.request_id,
+            request_payload=dict(row.request_payload or {}),
+            response=response_payload,
+            created_at=row.created_at,
+        )
+
+    @staticmethod
     def _to_approval_task(row: ApprovalTaskRow) -> ApprovalTaskSummary:
         return ApprovalTaskSummary(
             approval_task_id=row.approval_task_id,
@@ -1229,6 +2095,131 @@ class SqlAlchemyOpsGraphRepository:
             comment=row.comment,
             created_at=row.created_at,
             updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _normalize_delivery_state(value: object | None) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized == "accepted":
+            return "accepted"
+        if normalized == "failed":
+            return "failed"
+        return "published"
+
+    @staticmethod
+    def _coerce_delivery_error(value: object | None) -> dict[str, object] | None:
+        if isinstance(value, dict):
+            return {
+                str(key): item
+                for key, item in value.items()
+                if isinstance(key, str)
+            }
+        if value in {None, ""}:
+            return None
+        return {"message": str(value)}
+
+    def _publish_comms_draft(
+        self,
+        session: Session,
+        *,
+        incident_row: IncidentRow,
+        comms_row: CommsDraftRow,
+        actor_context: dict[str, object] | None = None,
+        remote_publish: bool = True,
+    ) -> CommsPublishResponse:
+        timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
+        timeline_actor_id = (
+            str(actor_context["actor_user_id"])
+            if actor_context is not None and actor_context.get("actor_user_id") is not None
+            else None
+        )
+        remote_result = None
+        if remote_publish:
+            draft_payload = self._load_comms_artifact_payload(session, comms_row.draft_id)
+            remote_result = self.remote_tool_resolver.publish_comms(
+                incident_id=incident_row.incident_id,
+                draft_id=comms_row.draft_id,
+                channel_type=comms_row.channel,
+                title=comms_row.title,
+                body_markdown=self._coerce_text(
+                    draft_payload.get("body_markdown"),
+                    default=f"Incident update for {incident_row.title}.",
+                ),
+                fact_set_version=comms_row.fact_set_version,
+            )
+        delivery_state = self._normalize_delivery_state(
+            remote_result.normalized_payload.get("delivery_state")
+            if remote_result is not None
+            else "published"
+        )
+        delivery_error = self._coerce_delivery_error(
+            remote_result.normalized_payload.get("delivery_error")
+            if remote_result is not None
+            else None
+        )
+        delivery_confirmed = bool(
+            remote_result.normalized_payload.get("delivery_confirmed")
+            if remote_result is not None
+            else True
+        )
+        provider_delivery_status = (
+            str(remote_result.normalized_payload.get("provider_delivery_status"))
+            if remote_result is not None
+            and remote_result.normalized_payload.get("provider_delivery_status") not in {None, ""}
+            else None
+        )
+        now = self._utcnow_naive()
+        published_message_ref = (
+            str(remote_result.normalized_payload.get("published_message_ref"))
+            if remote_result is not None
+            and remote_result.normalized_payload.get("published_message_ref") not in {None, ""}
+            else (f"{comms_row.channel}-msg-{uuid4().hex[:8]}" if delivery_state == "published" else None)
+        )
+        comms_row.status = delivery_state
+        comms_row.published_message_ref = published_message_ref
+        comms_row.published_at = now if delivery_state == "published" else None
+        comms_row.updated_at = now
+        incident_row.updated_at = now
+        if delivery_state == "published":
+            event_kind = "comms_published"
+            event_summary = f"Published {comms_row.channel} draft {comms_row.draft_id}."
+        elif delivery_state == "accepted":
+            event_kind = "comms_delivery_accepted"
+            event_summary = f"Accepted {comms_row.channel} draft {comms_row.draft_id} for delivery."
+        else:
+            event_kind = "comms_publish_failed"
+            event_summary = f"Failed to publish {comms_row.channel} draft {comms_row.draft_id}."
+        session.add(
+            self._timeline_event(
+                incident_id=incident_row.incident_id,
+                kind=event_kind,
+                summary=event_summary,
+                actor_type=timeline_actor_type,
+                actor_id=timeline_actor_id,
+                subject_type="comms_draft",
+                subject_id=comms_row.draft_id,
+                payload={
+                    "channel": comms_row.channel,
+                    "status": comms_row.status,
+                    "published_message_ref": comms_row.published_message_ref,
+                    "published_at": comms_row.published_at,
+                    "delivery_state": delivery_state,
+                    "delivery_confirmed": delivery_confirmed,
+                    "provider_delivery_status": provider_delivery_status,
+                    "delivery_error": delivery_error,
+                    "connection_id": remote_result.connection_id if remote_result is not None else None,
+                },
+            )
+        )
+        return CommsPublishResponse(
+            draft_id=comms_row.draft_id,
+            status=comms_row.status,
+            published_message_ref=comms_row.published_message_ref,
+            delivery_state=delivery_state,  # type: ignore[arg-type]
+            delivery_confirmed=delivery_confirmed,
+            provider_delivery_status=provider_delivery_status,
+            published_at=comms_row.published_at,
+            delivery_error=delivery_error,
         )
 
     @staticmethod
@@ -1323,6 +2314,9 @@ class SqlAlchemyOpsGraphRepository:
             baseline_checkpoint_seq=row.baseline_checkpoint_seq,
             replay_checkpoint_seq=row.replay_checkpoint_seq,
         )
+        semantic_metrics = SqlAlchemyOpsGraphRepository._replay_semantic_metrics(
+            report_artifact_path=row.report_artifact_path,
+        )
         return ReplayEvaluationSummary(
             report_id=row.report_id,
             baseline_id=row.baseline_id,
@@ -1346,6 +2340,28 @@ class SqlAlchemyOpsGraphRepository:
             latency_regression_total_ms=metrics["latency_regression_total_ms"],
             avg_latency_delta_ms=metrics["avg_latency_delta_ms"],
             max_latency_delta_ms=metrics["max_latency_delta_ms"],
+            semantic_check_count=semantic_metrics["semantic_check_count"],
+            semantic_mismatch_count=semantic_metrics["semantic_mismatch_count"],
+            semantic_match_rate=semantic_metrics["semantic_match_rate"],
+            service_id_mismatch_count=semantic_metrics["service_id_mismatch_count"],
+            incident_status_mismatch_count=semantic_metrics["incident_status_mismatch_count"],
+            fact_set_version_mismatch_count=semantic_metrics["fact_set_version_mismatch_count"],
+            top_hypothesis_expected_count=semantic_metrics["top_hypothesis_expected_count"],
+            top_hypothesis_actual_count=semantic_metrics["top_hypothesis_actual_count"],
+            top_hypothesis_hit_count=semantic_metrics["top_hypothesis_hit_count"],
+            top_hypothesis_hit_rate=semantic_metrics["top_hypothesis_hit_rate"],
+            recommendation_expected_count=semantic_metrics["recommendation_expected_count"],
+            recommendation_actual_count=semantic_metrics["recommendation_actual_count"],
+            recommendation_match_count=semantic_metrics["recommendation_match_count"],
+            recommendation_match_rate=semantic_metrics["recommendation_match_rate"],
+            comms_expected_count=semantic_metrics["comms_expected_count"],
+            comms_actual_count=semantic_metrics["comms_actual_count"],
+            comms_match_count=semantic_metrics["comms_match_count"],
+            comms_match_rate=semantic_metrics["comms_match_rate"],
+            postmortem_present_expected=semantic_metrics["postmortem_present_expected"],
+            postmortem_present_actual=semantic_metrics["postmortem_present_actual"],
+            postmortem_markdown_matched=semantic_metrics["postmortem_markdown_matched"],
+            semantic_checks=semantic_metrics["semantic_checks"],
             mismatches=row.mismatches,
             baseline_final_state=row.baseline_final_state,
             replay_final_state=row.replay_final_state,
@@ -1566,16 +2582,29 @@ class SqlAlchemyOpsGraphRepository:
         actor_user_id: str | None = None,
         request_id: str | None = None,
     ) -> list[ReplayAdminAuditLogSummary]:
-        with self.session_factory() as session:
-            stmt = select(ReplayAdminAuditLogRow).where(ReplayAdminAuditLogRow.workspace_id == workspace_id)
-            if action_type is not None:
-                stmt = stmt.where(ReplayAdminAuditLogRow.action_type == action_type)
-            if actor_user_id is not None:
-                stmt = stmt.where(ReplayAdminAuditLogRow.actor_user_id == actor_user_id)
-            if request_id is not None:
-                stmt = stmt.where(ReplayAdminAuditLogRow.request_id == request_id)
-            rows = session.scalars(stmt.order_by(ReplayAdminAuditLogRow.created_at.desc())).all()
-            return [self._to_replay_admin_audit_log(row) for row in rows]
+        return runtime_diag_list_replay_admin_audit_logs(
+            self,
+            workspace_id,
+            action_type=action_type,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
+        )
+
+    def list_remote_provider_smoke_runs(
+        self,
+        *,
+        limit: int = 10,
+        actor_user_id: str | None = None,
+        request_id: str | None = None,
+        provider: str | None = None,
+    ) -> list[RemoteProviderSmokeRunRecord]:
+        return runtime_diag_list_remote_provider_smoke_runs(
+            self,
+            limit=limit,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
+            provider=provider,
+        )
 
     def record_replay_admin_audit_log(
         self,
@@ -1589,25 +2618,31 @@ class SqlAlchemyOpsGraphRepository:
         request_payload: dict[str, object] | None = None,
         result_payload: dict[str, object] | None = None,
     ) -> ReplayAdminAuditLogSummary:
-        with self.session_factory.begin() as session:
-            self._append_replay_admin_audit_log(
-                session,
-                workspace_id=workspace_id,
-                action_type=action_type,
-                subject_type=subject_type,
-                subject_id=subject_id,
-                actor_context=actor_context,
-                idempotency_key=idempotency_key,
-                request_payload=request_payload,
-                result_payload=result_payload,
-            )
-            row = session.scalars(
-                select(ReplayAdminAuditLogRow)
-                .where(ReplayAdminAuditLogRow.workspace_id == workspace_id)
-                .order_by(ReplayAdminAuditLogRow.created_at.desc())
-            ).first()
-            assert row is not None
-            return self._to_replay_admin_audit_log(row)
+        return runtime_diag_record_replay_admin_audit_log(
+            self,
+            workspace_id=workspace_id,
+            action_type=action_type,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            actor_context=actor_context,
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            result_payload=result_payload,
+        )
+
+    def record_remote_provider_smoke_run(
+        self,
+        *,
+        request_payload: dict[str, object],
+        response_payload: dict[str, object],
+        actor_context: dict[str, object] | None = None,
+    ) -> RemoteProviderSmokeRunRecord:
+        return runtime_diag_record_remote_provider_smoke_run(
+            self,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            actor_context=actor_context,
+        )
 
     def list_hypotheses(self, incident_id: str) -> list[HypothesisSummary]:
         with self.session_factory() as session:
@@ -1770,37 +2805,19 @@ class SqlAlchemyOpsGraphRepository:
 
             published_drafts: list[CommsPublishResponse] = []
             for draft_row in selected_draft_rows:
-                if draft_row.status == "published":
+                if draft_row.status in {"accepted", "published"}:
                     raise ValueError("COMM_DRAFT_ALREADY_PUBLISHED")
                 if (
                     incident_row.current_fact_set_version != draft_row.fact_set_version
                     or draft_row.fact_set_version != command.expected_fact_set_version
                 ):
                     raise ValueError("COMM_DRAFT_STALE_FACT_SET")
-                draft_row.status = "published"
-                draft_row.published_message_ref = f"{draft_row.channel}-msg-{uuid4().hex[:8]}"
-                draft_row.updated_at = now
                 published_drafts.append(
-                    CommsPublishResponse(
-                        draft_id=draft_row.draft_id,
-                        status=draft_row.status,
-                        published_message_ref=draft_row.published_message_ref,
-                    )
-                )
-                session.add(
-                    self._timeline_event(
-                        incident_id=approval_row.incident_id,
-                        kind="comms_published",
-                        summary=f"Published {draft_row.channel} draft {draft_row.draft_id}.",
-                        actor_type=timeline_actor_type,
-                        actor_id=timeline_actor_id,
-                        subject_type="comms_draft",
-                        subject_id=draft_row.draft_id,
-                        payload={
-                            "channel": draft_row.channel,
-                            "status": draft_row.status,
-                            "published_message_ref": draft_row.published_message_ref,
-                        },
+                    self._publish_comms_draft(
+                        session,
+                        incident_row=incident_row,
+                        comms_row=draft_row,
+                        actor_context=actor_context,
                     )
                 )
 
@@ -1865,37 +2882,64 @@ class SqlAlchemyOpsGraphRepository:
     ) -> AlertIngestResponse:
         signal_id = f"signal-{uuid4().hex[:8]}"
         workflow_run_id = f"opsgraph-alert-{signal_id}"
+        normalized_observed_at = self._normalize_timestamp(observed_at) or self._utcnow_naive()
+        service_name = self._infer_service_name(correlation_key, summary)
         with self.session_factory.begin() as session:
-            signal_row = session.get(SignalIndexRow, correlation_key)
             incident_created = False
-            if signal_row is None:
+            incident_row = self._find_aggregate_incident(
+                session,
+                ops_workspace_id=ops_workspace_id,
+                service_name=service_name,
+                correlation_key=correlation_key,
+                summary=summary,
+                observed_at=normalized_observed_at,
+                source=source,
+            )
+            if incident_row is None:
                 incident_created = True
                 incident_id = f"incident-{uuid4().hex[:8]}"
-                session.add(
-                    IncidentRow(
-                        incident_id=incident_id,
-                        ops_workspace_id=ops_workspace_id,
-                        incident_key=f"INC-{observed_at.year}-{self._next_incident_number(session):04d}",
-                        title=summary,
-                        severity="sev2",
-                        incident_status="investigating",
-                        service_name=correlation_key.split(":")[0],
-                        opened_at=observed_at,
-                        acknowledged_at=observed_at,
-                        current_fact_set_version=1,
-                        latest_workflow_run_id=workflow_run_id,
-                        updated_at=self._normalize_timestamp(observed_at),
-                    )
+                incident_row = IncidentRow(
+                    incident_id=incident_id,
+                    ops_workspace_id=ops_workspace_id,
+                    incident_key=f"INC-{observed_at.year}-{self._next_incident_number(session):04d}",
+                    title=summary,
+                    severity="sev2",
+                    incident_status="investigating",
+                    service_name=service_name,
+                    opened_at=observed_at,
+                    acknowledged_at=observed_at,
+                    current_fact_set_version=1,
+                    latest_workflow_run_id=workflow_run_id,
+                    updated_at=normalized_observed_at,
                 )
+                session.add(incident_row)
+            else:
+                incident_id = incident_row.incident_id
+                incident_row.updated_at = normalized_observed_at
+                incident_row.latest_workflow_run_id = workflow_run_id
+                if incident_row.acknowledged_at is None:
+                    incident_row.acknowledged_at = observed_at
+            signal_row = session.get(SignalIndexRow, correlation_key)
+            if signal_row is None:
                 session.add(SignalIndexRow(correlation_key=correlation_key, incident_id=incident_id))
             else:
-                incident_id = signal_row.incident_id
-                incident_row = session.get(IncidentRow, incident_id)
-                if incident_row is not None:
-                    incident_row.updated_at = self._normalize_timestamp(observed_at)  # type: ignore[assignment]
-                    incident_row.latest_workflow_run_id = workflow_run_id
-                    if incident_row.acknowledged_at is None:
-                        incident_row.acknowledged_at = observed_at
+                signal_row.incident_id = incident_id
+            if incident_created:
+                session.add(
+                    self._timeline_event(
+                        incident_id=incident_id,
+                        kind="incident_correlated",
+                        summary=f"Created incident from {source} alert correlation window.",
+                        subject_type="incident",
+                        subject_id=incident_id,
+                        payload={
+                            "correlation_key": correlation_key,
+                            "service_name": service_name,
+                            "aggregation_strategy": "service_window_feature_overlap",
+                        },
+                        created_at=observed_at,
+                    )
+                )
             session.add(
                 SignalRow(
                     signal_id=signal_id,
@@ -1904,7 +2948,7 @@ class SqlAlchemyOpsGraphRepository:
                     status="firing",
                     title=summary,
                     dedupe_key=correlation_key,
-                    fired_at=self._normalize_timestamp(observed_at) or self._utcnow_naive(),
+                    fired_at=normalized_observed_at,
                 )
             )
             session.add(
@@ -1913,6 +2957,11 @@ class SqlAlchemyOpsGraphRepository:
                     incident_id=incident_id,
                     kind="signal_ingested",
                     summary=f"{source} alert ingested: {summary}",
+                    payload={
+                        "correlation_key": correlation_key,
+                        "service_name": service_name,
+                        "incident_created": incident_created,
+                    },
                     created_at=observed_at,
                 )
             )
@@ -2293,7 +3342,7 @@ class SqlAlchemyOpsGraphRepository:
             comms_row = session.get(CommsDraftRow, draft_id)
             if incident_row is None or comms_row is None or comms_row.incident_id != incident_id:
                 raise KeyError(draft_id)
-            if comms_row.status == "published":
+            if comms_row.status in {"accepted", "published"}:
                 raise ValueError("COMM_DRAFT_ALREADY_PUBLISHED")
             if incident_row.current_fact_set_version != comms_row.fact_set_version:
                 raise ValueError("COMM_DRAFT_STALE_FACT_SET")
@@ -2309,36 +3358,11 @@ class SqlAlchemyOpsGraphRepository:
                     or approval_row.status != "approved"
                 ):
                     raise ValueError("APPROVAL_REQUIRED")
-            timeline_actor_type = str((actor_context or {}).get("actor_type") or "system")
-            timeline_actor_id = (
-                str(actor_context["actor_user_id"])
-                if actor_context is not None and actor_context.get("actor_user_id") is not None
-                else None
-            )
-            comms_row.status = "published"
-            comms_row.published_message_ref = f"{comms_row.channel}-msg-{uuid4().hex[:8]}"
-            comms_row.updated_at = self._utcnow_naive()
-            incident_row.updated_at = self._utcnow_naive()
-            response = CommsPublishResponse(
-                draft_id=draft_id,
-                status=comms_row.status,
-                published_message_ref=comms_row.published_message_ref,
-            )
-            session.add(
-                self._timeline_event(
-                    incident_id=incident_id,
-                    kind="comms_published",
-                    summary=f"Published {comms_row.channel} draft {draft_id}.",
-                    actor_type=timeline_actor_type,
-                    actor_id=timeline_actor_id,
-                    subject_type="comms_draft",
-                    subject_id=draft_id,
-                    payload={
-                        "channel": comms_row.channel,
-                        "status": comms_row.status,
-                        "published_message_ref": comms_row.published_message_ref,
-                    },
-                )
+            response = self._publish_comms_draft(
+                session,
+                incident_row=incident_row,
+                comms_row=comms_row,
+                actor_context=actor_context,
             )
             self._append_audit_log(
                 session,
@@ -2415,6 +3439,14 @@ class SqlAlchemyOpsGraphRepository:
                 idempotency_key=idempotency_key,
                 request_payload=command.model_dump(mode="json"),
                 result_payload=response.model_dump(mode="json"),
+            )
+            self._upsert_context_bundle(session, incident_row)
+            self._persist_successful_mitigation_memory(
+                session,
+                incident_row,
+                resolution_summary=command.resolution_summary,
+                root_cause_fact_ids=list(command.root_cause_fact_ids),
+                source_workflow_run_id=incident_row.latest_workflow_run_id,
             )
             return response
 
@@ -2556,6 +3588,15 @@ class SqlAlchemyOpsGraphRepository:
                 request_payload=command.model_dump(mode="json"),
                 result_payload=response.model_dump(mode="json"),
             )
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is not None:
+                self._persist_postmortem_style_memory(
+                    session,
+                    incident_row,
+                    postmortem_output=None,
+                    source_workflow_run_id=incident_row.latest_workflow_run_id,
+                    finalized_by_user_id=command.finalized_by_user_id,
+                )
             return response
 
     def list_postmortems(
@@ -3053,6 +4094,71 @@ class SqlAlchemyOpsGraphRepository:
             "csv_report_path": csv_report_path,
         }
 
+    @staticmethod
+    def _replay_semantic_metrics(*, report_artifact_path: str | None) -> dict[str, object]:
+        defaults: dict[str, object] = {
+            "semantic_check_count": 0,
+            "semantic_mismatch_count": 0,
+            "semantic_match_rate": None,
+            "service_id_mismatch_count": 0,
+            "incident_status_mismatch_count": 0,
+            "fact_set_version_mismatch_count": 0,
+            "top_hypothesis_expected_count": 0,
+            "top_hypothesis_actual_count": 0,
+            "top_hypothesis_hit_count": 0,
+            "top_hypothesis_hit_rate": None,
+            "recommendation_expected_count": 0,
+            "recommendation_actual_count": 0,
+            "recommendation_match_count": 0,
+            "recommendation_match_rate": None,
+            "comms_expected_count": 0,
+            "comms_actual_count": 0,
+            "comms_match_count": 0,
+            "comms_match_rate": None,
+            "postmortem_present_expected": False,
+            "postmortem_present_actual": False,
+            "postmortem_markdown_matched": None,
+            "semantic_checks": [],
+        }
+        if report_artifact_path in {None, ""}:
+            return defaults
+        try:
+            payload = json.loads(Path(str(report_artifact_path)).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return defaults
+        report_payload = payload.get("report") if isinstance(payload, dict) else None
+        if not isinstance(report_payload, dict):
+            return defaults
+        semantic_checks = [
+            ReplaySemanticCheckSummary.model_validate(item)
+            for item in report_payload.get("semantic_checks", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "semantic_check_count": int(report_payload.get("semantic_check_count") or 0),
+            "semantic_mismatch_count": int(report_payload.get("semantic_mismatch_count") or 0),
+            "semantic_match_rate": report_payload.get("semantic_match_rate"),
+            "service_id_mismatch_count": int(report_payload.get("service_id_mismatch_count") or 0),
+            "incident_status_mismatch_count": int(report_payload.get("incident_status_mismatch_count") or 0),
+            "fact_set_version_mismatch_count": int(report_payload.get("fact_set_version_mismatch_count") or 0),
+            "top_hypothesis_expected_count": int(report_payload.get("top_hypothesis_expected_count") or 0),
+            "top_hypothesis_actual_count": int(report_payload.get("top_hypothesis_actual_count") or 0),
+            "top_hypothesis_hit_count": int(report_payload.get("top_hypothesis_hit_count") or 0),
+            "top_hypothesis_hit_rate": report_payload.get("top_hypothesis_hit_rate"),
+            "recommendation_expected_count": int(report_payload.get("recommendation_expected_count") or 0),
+            "recommendation_actual_count": int(report_payload.get("recommendation_actual_count") or 0),
+            "recommendation_match_count": int(report_payload.get("recommendation_match_count") or 0),
+            "recommendation_match_rate": report_payload.get("recommendation_match_rate"),
+            "comms_expected_count": int(report_payload.get("comms_expected_count") or 0),
+            "comms_actual_count": int(report_payload.get("comms_actual_count") or 0),
+            "comms_match_count": int(report_payload.get("comms_match_count") or 0),
+            "comms_match_rate": report_payload.get("comms_match_rate"),
+            "postmortem_present_expected": bool(report_payload.get("postmortem_present_expected")),
+            "postmortem_present_actual": bool(report_payload.get("postmortem_present_actual")),
+            "postmortem_markdown_matched": report_payload.get("postmortem_markdown_matched"),
+            "semantic_checks": semantic_checks,
+        }
+
     def update_replay_status(
         self,
         replay_run_id: str,
@@ -3176,11 +4282,47 @@ class SqlAlchemyOpsGraphRepository:
             return replay
 
     def get_incident_execution_seed(self, incident_id: str) -> dict[str, object]:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            self._upsert_context_bundle(session, incident_row)
+            return self._build_incident_execution_seed(session, incident_row)
+
+    def read_context_bundle(
+        self,
+        incident_id: str,
+        *,
+        context_bundle_id: str | None = None,
+    ) -> dict[str, object]:
+        with self.session_factory.begin() as session:
+            incident_row = session.get(IncidentRow, incident_id)
+            if incident_row is None:
+                raise KeyError(incident_id)
+            context_bundle = self._resolve_context_bundle_row(
+                session,
+                incident_row,
+                context_bundle_id=context_bundle_id,
+            )
+            return {
+                "context_bundle_id": context_bundle.context_bundle_id,
+                "summary": context_bundle.summary,
+                "missing_sources": list(context_bundle.missing_sources or []),
+                "refs": [dict(item) for item in context_bundle.refs or [] if isinstance(item, dict)],
+            }
+
+    def get_postmortem_memory_context(self, incident_id: str) -> list[dict[str, object]]:
         with self.session_factory() as session:
             incident_row = session.get(IncidentRow, incident_id)
             if incident_row is None:
                 raise KeyError(incident_id)
-            return self._build_incident_execution_seed(session, incident_row)
+            return self._list_memory_payloads(
+                session,
+                incident_row=incident_row,
+                scopes=("workspace", "service", "team"),
+                memory_types=("postmortem_style", "incident_pattern", "successful_mitigation"),
+                include_current_incident=True,
+            )
 
     def record_incident_response_result(
         self,
@@ -3391,14 +4533,46 @@ class SqlAlchemyOpsGraphRepository:
                             fact_set_version=fact_set_version,
                             approval_task_id=approval_task_id,
                             published_message_ref=None,
+                            published_at=None,
                             created_at=now,
                             updated_at=now,
                         )
+                    )
+                    self._merge_comms_artifact(
+                        session,
+                        draft_id=draft_id,
+                        incident_id=incident_id,
+                        channel=channel,
+                        title=self._draft_title(incident_row.title, channel),
+                        fact_set_version=fact_set_version,
+                        body_markdown=self._coerce_text(
+                            draft_payload.get("body_markdown"),
+                            default=f"Current incident update for {incident_row.title}.",
+                        ),
+                        fact_refs=self._normalize_refs(
+                            draft_payload.get("fact_refs"),
+                            fallback_kind="incident_fact",
+                            fallback_id="fact-unknown",
+                        ),
+                        created_at=now,
                     )
                     if generated_draft_id is None:
                         generated_draft_id = draft_id
                         generated_draft_channel = channel
                         generated_draft_fact_set_version = fact_set_version
+            context_bundle = self._upsert_context_bundle(
+                session,
+                incident_row,
+                source_workflow_run_id=workflow_run_id,
+            )
+            self._persist_incident_memory(
+                session,
+                incident_row,
+                context_bundle=context_bundle,
+                workflow_run_id=workflow_run_id,
+                hypothesis_ids=generated_hypothesis_ids
+                or ([str(selected_hypothesis_id)] if selected_hypothesis_id not in {None, ""} else []),
+            )
             return {
                 "generated_hypothesis_ids": generated_hypothesis_ids,
                 "recommendation_id": generated_recommendation_id,
@@ -3407,6 +4581,66 @@ class SqlAlchemyOpsGraphRepository:
                 "draft_channel": generated_draft_channel,
                 "draft_fact_set_version": generated_draft_fact_set_version,
             }
+
+    def _build_replay_case_expected_output(
+        self,
+        *,
+        incident_row: IncidentRow,
+        workflow_run_id: str,
+        checkpoint_seq: int,
+        postmortem_row: PostmortemRow,
+        postmortem_markdown: str,
+        follow_up_actions: list[dict[str, object]],
+        replay_capture_hints: list[str],
+        fact_rows: list[IncidentFactRow],
+        hypothesis_rows: list[HypothesisRow],
+        recommendation_rows: list[RecommendationRow],
+        approval_rows: list[ApprovalTaskRow],
+        comms_rows: list[CommsDraftRow],
+    ) -> dict[str, object]:
+        return {
+            "incident": {
+                "incident_id": incident_row.incident_id,
+                "incident_key": incident_row.incident_key,
+                "service_id": incident_row.service_name,
+                "severity": incident_row.severity,
+                "status": incident_row.incident_status,
+                "current_fact_set_version": incident_row.current_fact_set_version,
+                "latest_workflow_run_id": incident_row.latest_workflow_run_id,
+            },
+            "workflow": {
+                "workflow_name": "opsgraph_retrospective",
+                "workflow_run_id": workflow_run_id,
+                "checkpoint_seq": checkpoint_seq,
+                "current_state": "retrospective_completed",
+            },
+            "facts": [self._to_fact(row).model_dump(mode="json", by_alias=True) for row in fact_rows],
+            "hypotheses": [
+                self._to_hypothesis(row).model_dump(mode="json", by_alias=True)
+                for row in hypothesis_rows
+            ],
+            "recommendations": [
+                self._to_recommendation(row).model_dump(mode="json", by_alias=True)
+                for row in recommendation_rows
+            ],
+            "approval_tasks": [
+                self._to_approval_task(row).model_dump(mode="json", by_alias=True)
+                for row in approval_rows
+            ],
+            "comms_drafts": [
+                self._to_comms(row).model_dump(mode="json", by_alias=True)
+                for row in comms_rows
+            ],
+            "postmortem": {
+                "postmortem_id": postmortem_row.postmortem_id,
+                "status": postmortem_row.status,
+                "artifact_id": postmortem_row.artifact_id,
+                "replay_case_id": postmortem_row.replay_case_id,
+                "postmortem_markdown": postmortem_markdown,
+                "follow_up_actions": [dict(item) for item in follow_up_actions],
+                "replay_capture_hints": list(replay_capture_hints),
+            },
+        }
 
     def record_retrospective_result(
         self,
@@ -3471,6 +4705,63 @@ class SqlAlchemyOpsGraphRepository:
                 .where(TimelineEventRow.incident_id == incident_id)
                 .order_by(TimelineEventRow.created_at.asc())
             ).all()
+            hypothesis_rows = session.scalars(
+                select(HypothesisRow)
+                .where(HypothesisRow.incident_id == incident_id)
+                .order_by(HypothesisRow.rank.asc(), HypothesisRow.updated_at.asc())
+            ).all()
+            recommendation_rows = session.scalars(
+                select(RecommendationRow)
+                .where(RecommendationRow.incident_id == incident_id)
+                .order_by(RecommendationRow.created_at.asc(), RecommendationRow.recommendation_id.asc())
+            ).all()
+            approval_rows = session.scalars(
+                select(ApprovalTaskRow)
+                .where(ApprovalTaskRow.incident_id == incident_id)
+                .order_by(ApprovalTaskRow.created_at.asc(), ApprovalTaskRow.approval_task_id.asc())
+            ).all()
+            comms_rows = session.scalars(
+                select(CommsDraftRow)
+                .where(CommsDraftRow.incident_id == incident_id)
+                .order_by(CommsDraftRow.created_at.asc(), CommsDraftRow.draft_id.asc())
+            ).all()
+            follow_up_actions = self._structured_items(postmortem_output, "follow_up_actions")
+            replay_capture_hints = [
+                str(item)
+                for item in (
+                    postmortem_output.get("replay_capture_hints")
+                    if isinstance(postmortem_output, dict)
+                    and isinstance(postmortem_output.get("replay_capture_hints"), list)
+                    else []
+                )
+                if item
+            ]
+            postmortem_markdown = self._coerce_text(
+                (
+                    postmortem_output.get("postmortem_markdown")
+                    if isinstance(postmortem_output, dict)
+                    else None
+                ),
+                default=(
+                    f"# {incident_row.incident_key}\n\n"
+                    f"{incident_row.title}\n\n"
+                    f"Resolution summary: {incident_row.incident_status}"
+                ),
+            )
+            expected_output_payload = self._build_replay_case_expected_output(
+                incident_row=incident_row,
+                workflow_run_id=workflow_run_id,
+                checkpoint_seq=checkpoint_seq,
+                postmortem_row=postmortem_row,
+                postmortem_markdown=postmortem_markdown,
+                follow_up_actions=follow_up_actions,
+                replay_capture_hints=replay_capture_hints,
+                fact_rows=fact_rows,
+                hypothesis_rows=hypothesis_rows,
+                recommendation_rows=recommendation_rows,
+                approval_rows=approval_rows,
+                comms_rows=comms_rows,
+            )
             if replay_case_row is None:
                 session.add(
                     ReplayCaseRow(
@@ -3482,7 +4773,7 @@ class SqlAlchemyOpsGraphRepository:
                         subject_id=incident_id,
                         case_name=f"{incident_row.incident_key} retrospective replay",
                         input_snapshot_payload=input_snapshot,
-                        expected_output_payload=None,
+                        expected_output_payload=expected_output_payload,
                         source_workflow_run_id=workflow_run_id,
                         created_at=now,
                         updated_at=now,
@@ -3490,6 +4781,7 @@ class SqlAlchemyOpsGraphRepository:
                 )
             else:
                 replay_case_row.input_snapshot_payload = input_snapshot
+                replay_case_row.expected_output_payload = expected_output_payload
                 replay_case_row.case_name = f"{incident_row.incident_key} retrospective replay"
                 replay_case_row.source_workflow_run_id = workflow_run_id
                 replay_case_row.updated_at = now
@@ -3506,32 +4798,9 @@ class SqlAlchemyOpsGraphRepository:
                             "fact_set_version": incident_row.current_fact_set_version,
                             "workflow_run_id": workflow_run_id,
                             "replay_case_id": replay_case_id,
-                            "postmortem_markdown": self._coerce_text(
-                                (
-                                    postmortem_output.get("postmortem_markdown")
-                                    if isinstance(postmortem_output, dict)
-                                    else None
-                                ),
-                                default=(
-                                    f"# {incident_row.incident_key}\n\n"
-                                    f"{incident_row.title}\n\n"
-                                    f"Resolution summary: {incident_row.incident_status}"
-                                ),
-                            ),
-                            "follow_up_actions": self._structured_items(
-                                postmortem_output,
-                                "follow_up_actions",
-                            ),
-                            "replay_capture_hints": [
-                                str(item)
-                                for item in (
-                                    postmortem_output.get("replay_capture_hints")
-                                    if isinstance(postmortem_output, dict)
-                                    and isinstance(postmortem_output.get("replay_capture_hints"), list)
-                                    else []
-                                )
-                                if item
-                            ],
+                            "postmortem_markdown": postmortem_markdown,
+                            "follow_up_actions": follow_up_actions,
+                            "replay_capture_hints": replay_capture_hints,
                             "facts": [
                                 {
                                     "fact_id": row.fact_id,
@@ -3555,25 +4824,23 @@ class SqlAlchemyOpsGraphRepository:
                         "incident_id": incident_id,
                         "postmortem_id": postmortem_row.postmortem_id,
                         "replay_case_id": replay_case_id,
-                        "follow_up_action_count": len(
-                            self._structured_items(postmortem_output, "follow_up_actions")
-                        ),
-                        "replay_hint_count": len(
-                            [
-                                item
-                                for item in (
-                                    postmortem_output.get("replay_capture_hints")
-                                    if isinstance(postmortem_output, dict)
-                                    and isinstance(postmortem_output.get("replay_capture_hints"), list)
-                                    else []
-                                )
-                                if item
-                            ]
-                        ),
+                        "follow_up_action_count": len(follow_up_actions),
+                        "replay_hint_count": len(replay_capture_hints),
                     },
                     created_at=now,
                     updated_at=now,
                 )
+            )
+            self._upsert_context_bundle(
+                session,
+                incident_row,
+                source_workflow_run_id=workflow_run_id,
+            )
+            self._persist_postmortem_style_memory(
+                session,
+                incident_row,
+                postmortem_output=postmortem_output,
+                source_workflow_run_id=workflow_run_id,
             )
 
     @staticmethod
@@ -4055,6 +5322,53 @@ class SqlAlchemyOpsGraphRepository:
             .where(CommsDraftRow.incident_id == incident_row.incident_id)
             .order_by(CommsDraftRow.created_at.asc())
         ).all()
+        repository = SqlAlchemyOpsGraphRepository
+        context_bundle_row = session.scalars(
+            select(ContextBundleRow)
+            .where(ContextBundleRow.incident_id == incident_row.incident_id)
+            .where(ContextBundleRow.fact_set_version == incident_row.current_fact_set_version)
+            .order_by(ContextBundleRow.updated_at.desc())
+            .limit(1)
+        ).first()
+        if context_bundle_row is None:
+            context_bundle_id = repository._context_bundle_identifier(
+                incident_row.incident_id,
+                incident_row.current_fact_set_version,
+            )
+            summary, missing_sources, refs = repository._build_context_bundle_payload(
+                incident_row,
+                fact_rows,
+                hypothesis_rows,
+            )
+        else:
+            context_bundle_id = context_bundle_row.context_bundle_id
+            summary = context_bundle_row.summary
+            missing_sources = list(context_bundle_row.missing_sources or [])
+            refs = [dict(item) for item in context_bundle_row.refs or [] if isinstance(item, dict)]
+        memory_filters = [
+            MemoryRecordRow.ops_workspace_id == incident_row.ops_workspace_id,
+            or_(
+                MemoryRecordRow.incident_id == incident_row.incident_id,
+                MemoryRecordRow.service_id == incident_row.service_name,
+                MemoryRecordRow.team_key == repository._owner_team_for_service(incident_row.service_name),
+                MemoryRecordRow.memory_scope == "workspace",
+            ),
+        ]
+        memory_rows = session.scalars(
+            select(MemoryRecordRow)
+            .where(*memory_filters)
+            .order_by(MemoryRecordRow.updated_at.desc(), MemoryRecordRow.memory_id.desc())
+        ).all()
+        investigation_memory_context = [
+            repository._memory_record_payload(row)
+            for row in memory_rows
+            if row.memory_type in {"incident_short_term", "incident_pattern", "successful_mitigation"}
+        ][:6]
+        recommendation_memory_context = [
+            repository._memory_record_payload(row)
+            for row in memory_rows
+            if row.memory_type == "successful_mitigation"
+        ][:6]
         return {
             "incident_id": incident_row.incident_id,
             "ops_workspace_id": incident_row.ops_workspace_id,
@@ -4070,7 +5384,10 @@ class SqlAlchemyOpsGraphRepository:
                 for row in signal_rows
             ],
             "current_incident_candidates": [],
-            "context_bundle_id": "context-1",
+            "context_bundle_id": context_bundle_id,
+            "context_bundle_summary": summary,
+            "context_missing_sources": missing_sources,
+            "context_bundle_refs": refs,
             "current_fact_set_version": incident_row.current_fact_set_version,
             "service_id": incident_row.service_name,
             "confirmed_fact_refs": [
@@ -4079,6 +5396,8 @@ class SqlAlchemyOpsGraphRepository:
             "top_hypothesis_refs": [
                 {"kind": "hypothesis", "id": row.hypothesis_id} for row in hypothesis_rows[:3]
             ],
+            "investigation_memory_context": investigation_memory_context,
+            "recommendation_memory_context": recommendation_memory_context,
             "target_channels": [row.channel for row in comms_rows] or ["internal_slack"],
             "organization_id": "org-1",
             "workspace_id": "ws-1",

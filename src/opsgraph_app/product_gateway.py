@@ -514,17 +514,62 @@ class OpsGraphProductModelGateway:
             default="auto",
         )
         self._configured_model_name = self._env_value("OPSGRAPH_OPENAI_MODEL")
+        self._configured_allow_fallback = self._env_bool("OPSGRAPH_MODEL_ALLOW_FALLBACK")
+        self._fallback_policy_source = "default"
         self._provider_mode_decision = None
+        self._last_primary_error = None
+        self._last_runtime_fallback_reason = None
         if primary_gateway is None:
-            primary_gateway, default_allow_fallback = self._build_primary_gateway()
+            primary_gateway, provider_mode_decision = self._build_primary_gateway()
         else:
-            default_allow_fallback = True
+            provider_mode_decision = self._shared_platform.RuntimeModeDecision(
+                requested_mode=self._requested_provider_mode,
+                effective_mode="openai",
+                use_remote=True,
+                allow_fallback=True,
+                fallback_reason=None,
+            )
         self._primary_gateway = primary_gateway
-        self._allow_fallback = default_allow_fallback if allow_fallback is None else allow_fallback
+        if allow_fallback is not None:
+            resolved_allow_fallback = bool(allow_fallback)
+            self._fallback_policy_source = "explicit"
+        elif self._configured_allow_fallback is not None:
+            resolved_allow_fallback = self._configured_allow_fallback
+            self._fallback_policy_source = "env"
+        else:
+            resolved_allow_fallback = provider_mode_decision.allow_fallback
+        if provider_mode_decision.requested_mode == "local":
+            resolved_allow_fallback = False
+        self._allow_fallback = resolved_allow_fallback
+        self._provider_mode_decision = self._shared_platform.RuntimeModeDecision(
+            requested_mode=provider_mode_decision.requested_mode,
+            effective_mode=provider_mode_decision.effective_mode,
+            use_remote=provider_mode_decision.use_remote,
+            allow_fallback=self._allow_fallback,
+            fallback_reason=provider_mode_decision.fallback_reason,
+        )
+        if (
+            self._primary_gateway is None
+            and self._provider_mode_decision.fallback_reason is not None
+            and not self._allow_fallback
+        ):
+            raise ValueError(str(self._provider_mode_decision.fallback_reason))
 
     @staticmethod
     def _env_value(name: str) -> str | None:
         return load_shared_agent_platform().env_value(name)
+
+    @classmethod
+    def _env_bool(cls, name: str) -> bool | None:
+        raw = cls._env_value(name)
+        if raw is None:
+            return None
+        normalized = raw.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"INVALID_{name}")
 
     def _build_primary_gateway(self):
         provider = self._requested_provider_mode
@@ -540,9 +585,8 @@ class OpsGraphProductModelGateway:
             strict_missing_error="OPSGRAPH_OPENAI_MODEL",
             auto_fallback_reason="MODEL_PROVIDER_NOT_CONFIGURED",
         )
-        self._provider_mode_decision = decision
         if not decision.use_remote:
-            return None, decision.allow_fallback
+            return None, decision
         try:
             gateway = _OpenAIResponsesOpsGraphProductGateway(
                 model_name=str(model_name),
@@ -550,28 +594,36 @@ class OpsGraphProductModelGateway:
                 base_url=self._env_value("OPSGRAPH_OPENAI_BASE_URL"),
                 timeout_seconds=float(self._env_value("OPSGRAPH_OPENAI_TIMEOUT_SECONDS") or 30.0),
             )
-        except Exception:
+            self._last_primary_error = None
+        except Exception as exc:
+            self._last_primary_error = exc.__class__.__name__
             if provider == "openai":
                 raise
-            self._provider_mode_decision = self._shared_platform.RuntimeModeDecision(
+            fallback_decision = self._shared_platform.RuntimeModeDecision(
                 requested_mode=decision.requested_mode,
                 effective_mode="local",
                 use_remote=False,
                 allow_fallback=True,
                 fallback_reason="MODEL_PROVIDER_INIT_FAILED",
             )
-            return None, True
-        return gateway, decision.allow_fallback
+            return None, fallback_decision
+        return gateway, decision
 
     def generate(self, *, assembled_prompt) -> Any:
         if self._primary_gateway is None:
+            self._last_runtime_fallback_reason = None
             return self._fallback_gateway.generate(assembled_prompt=assembled_prompt)
         try:
-            return self._primary_gateway.generate(assembled_prompt=assembled_prompt)
-        except Exception:
+            response = self._primary_gateway.generate(assembled_prompt=assembled_prompt)
+        except Exception as exc:
+            self._last_primary_error = exc.__class__.__name__
             if not self._allow_fallback:
                 raise
+            self._last_runtime_fallback_reason = "MODEL_PROVIDER_REQUEST_FAILED"
             return self._fallback_gateway.generate(assembled_prompt=assembled_prompt)
+        self._last_primary_error = None
+        self._last_runtime_fallback_reason = None
+        return response
 
     def describe_capability(self) -> dict[str, object]:
         decision = self._provider_mode_decision or self._shared_platform.RuntimeModeDecision(
@@ -585,13 +637,25 @@ class OpsGraphProductModelGateway:
                 else None
             ),
         )
+        effective_mode = decision.effective_mode
+        backend_id = "openai-responses" if decision.effective_mode == "openai" else "heuristic-local"
+        fallback_reason = decision.fallback_reason
+        if self._last_runtime_fallback_reason is not None:
+            effective_mode = "local"
+            backend_id = "heuristic-local"
+            fallback_reason = self._last_runtime_fallback_reason
         return self._shared_platform.RuntimeCapabilityDescriptor(
             requested_mode=decision.requested_mode,
-            effective_mode=decision.effective_mode,
-            backend_id="openai-responses" if decision.effective_mode == "openai" else "heuristic-local",
-            fallback_reason=decision.fallback_reason,
+            effective_mode=effective_mode,
+            backend_id=backend_id,
+            fallback_reason=fallback_reason,
             details={
                 "configured_model": self._configured_model_name,
                 "fallback_enabled": self._allow_fallback,
+                "fallback_policy_source": self._fallback_policy_source,
+                "strict_remote_required": (
+                    decision.requested_mode != "local" and not self._allow_fallback
+                ),
+                "last_primary_error": self._last_primary_error,
             },
         ).as_dict()

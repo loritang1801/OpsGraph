@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -18,6 +21,28 @@ from opsgraph_app.worker import OpsGraphReplayWorker
 
 _AP = load_shared_agent_platform()
 TestClient = _AP.fastapi_test_client_class()
+
+_AUTH_ENV_KEYS = (
+    "OPSGRAPH_ALLOW_HEADER_AUTH_FALLBACK",
+    "OPSGRAPH_SEED_DEMO_AUTH",
+    "OPSGRAPH_BOOTSTRAP_ADMIN_EMAIL",
+    "OPSGRAPH_BOOTSTRAP_ADMIN_PASSWORD",
+    "OPSGRAPH_BOOTSTRAP_ADMIN_DISPLAY_NAME",
+    "OPSGRAPH_BOOTSTRAP_ORG_SLUG",
+    "OPSGRAPH_BOOTSTRAP_ORG_NAME",
+)
+
+
+def _create_auth_database_url() -> tuple[tempfile.TemporaryDirectory, str]:
+    temp_dir = tempfile.TemporaryDirectory(prefix="opsgraph-auth-")
+    database_url = f"sqlite+pysqlite:///{Path(temp_dir.name, 'opsgraph.db').resolve().as_posix()}"
+    return temp_dir, database_url
+
+
+def _patched_auth_env(**overrides: str) -> patch:
+    values = {key: "" for key in _AUTH_ENV_KEYS}
+    values.update(overrides)
+    return patch.dict(os.environ, values, clear=False)
 
 
 class OpsGraphAuthorizationTests(unittest.TestCase):
@@ -96,6 +121,114 @@ class OpsGraphAuthServiceTests(unittest.TestCase):
         self.assertEqual(context.user_id, "user-1")
         self.assertEqual(context.role, "operator")
         self.assertIsNone(context.session_id)
+
+    def test_persistent_auth_defaults_reject_header_only_fallback(self) -> None:
+        temp_dir, database_url = _create_auth_database_url()
+        self.addCleanup(temp_dir.cleanup)
+        with _patched_auth_env():
+            service = build_app_service(database_url=database_url)
+        self.addCleanup(service.close)
+
+        with self.assertRaises(OpsGraphAuthorizationError) as auth_error:
+            service.auth_service.build_authorizer().authorize(
+                required_role="operator",
+                authorization="Bearer test-token",
+                organization_id="org-1",
+                user_id="user-1",
+                user_role="operator",
+            )
+
+        self.assertEqual(auth_error.exception.code, "AUTH_SESSION_REQUIRED")
+        self.assertEqual(auth_error.exception.status_code, 401)
+
+    def test_persistent_auth_defaults_do_not_seed_demo_users(self) -> None:
+        temp_dir, database_url = _create_auth_database_url()
+        self.addCleanup(temp_dir.cleanup)
+        with _patched_auth_env():
+            service = build_app_service(database_url=database_url)
+        self.addCleanup(service.close)
+
+        with self.assertRaises(OpsGraphAuthorizationError) as auth_error:
+            service.auth_service.create_session(
+                {
+                    "email": "admin@example.com",
+                    "password": "opsgraph-demo",
+                    "organization_slug": "acme",
+                }
+            )
+
+        self.assertEqual(auth_error.exception.code, "AUTH_INVALID_CREDENTIALS")
+
+    def test_persistent_auth_can_seed_bootstrap_admin(self) -> None:
+        temp_dir, database_url = _create_auth_database_url()
+        self.addCleanup(temp_dir.cleanup)
+        with _patched_auth_env(
+            OPSGRAPH_BOOTSTRAP_ADMIN_EMAIL="bootstrap-admin@example.com",
+            OPSGRAPH_BOOTSTRAP_ADMIN_PASSWORD="bootstrap-secret",
+            OPSGRAPH_BOOTSTRAP_ADMIN_DISPLAY_NAME="Bootstrap Admin",
+            OPSGRAPH_BOOTSTRAP_ORG_SLUG="bootstrap-org",
+            OPSGRAPH_BOOTSTRAP_ORG_NAME="Bootstrap Org",
+        ):
+            service = build_app_service(database_url=database_url)
+        self.addCleanup(service.close)
+
+        issue = service.auth_service.create_session(
+            {
+                "email": "bootstrap-admin@example.com",
+                "password": "bootstrap-secret",
+                "organization_slug": "bootstrap-org",
+            }
+        )
+        context = service.auth_service.build_authorizer().authorize(
+            required_role="product_admin",
+            authorization=f"Bearer {issue.response.access_token}",
+            organization_id=None,
+        )
+
+        self.assertEqual(issue.response.user.display_name, "Bootstrap Admin")
+        self.assertEqual(issue.response.active_organization.slug, "bootstrap-org")
+        self.assertEqual(context.organization_id, "org-bootstrap-1")
+        self.assertEqual(context.user_id, "user-bootstrap-admin-1")
+        self.assertEqual(context.role, "product_admin")
+        self.assertIsNotNone(context.session_id)
+
+    def test_persistent_auth_can_reenable_header_fallback_via_env(self) -> None:
+        temp_dir, database_url = _create_auth_database_url()
+        self.addCleanup(temp_dir.cleanup)
+        with _patched_auth_env(OPSGRAPH_ALLOW_HEADER_AUTH_FALLBACK="true"):
+            service = build_app_service(database_url=database_url)
+        self.addCleanup(service.close)
+
+        context = service.auth_service.build_authorizer().authorize(
+            required_role="operator",
+            authorization="Bearer test-token",
+            organization_id="org-1",
+            user_id="user-1",
+            user_role="operator",
+        )
+
+        self.assertEqual(context.organization_id, "org-1")
+        self.assertEqual(context.user_id, "user-1")
+        self.assertEqual(context.role, "operator")
+        self.assertIsNone(context.session_id)
+
+    def test_persistent_auth_can_reenable_demo_seed_via_env(self) -> None:
+        temp_dir, database_url = _create_auth_database_url()
+        self.addCleanup(temp_dir.cleanup)
+        with _patched_auth_env(OPSGRAPH_SEED_DEMO_AUTH="true"):
+            service = build_app_service(database_url=database_url)
+        self.addCleanup(service.close)
+
+        issue = service.auth_service.create_session(
+            {
+                "email": "admin@example.com",
+                "password": "opsgraph-demo",
+                "organization_slug": "acme",
+            }
+        )
+
+        self.assertEqual(issue.response.user.email, "admin@example.com")
+        self.assertEqual(issue.response.active_organization.slug, "acme")
 
     def test_create_session_issue_access_token_and_authorize(self) -> None:
         service = build_app_service()
@@ -311,8 +444,136 @@ class OpsGraphRouteAuthorizationTests(unittest.TestCase):
             data,
             expected_fields={
                 "product": "opsgraph",
+                "auth.mode": "demo_compatible",
+                "auth.header_fallback_enabled": True,
                 "replay_worker_alert_policy.warning_consecutive_failures": 1,
                 "replay_worker_alert_policy.critical_consecutive_failures": 3,
+            },
+        )
+
+    def test_remote_provider_smoke_route_requires_product_admin_access(self) -> None:
+        _AP.request_with_header_auth_and_assert_json_error(
+            self,
+            self.client,
+            "POST",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke",
+            role="operator",
+            status_code=403,
+            error_code="AUTH_FORBIDDEN",
+            json={},
+        )
+
+    def test_remote_provider_smoke_route_allows_product_admin_alias(self) -> None:
+        _response, data = _AP.request_with_header_auth_and_get_data(
+            self,
+            self.client,
+            "POST",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke",
+            role="org_admin",
+            json={"providers": ["deployment_lookup"]},
+        )
+
+        _AP.assert_fields(
+            self,
+            data,
+            expected_fields={
+                "diagnostic_run_id": "runtime-smoke-stub-1",
+                "providers.0": "deployment_lookup",
+                "summary.success_count": 0,
+                "summary.skipped_count": 1,
+                "summary.failed_count": 0,
+                "results.0.provider": "deployment_lookup",
+                "results.0.status": "skipped",
+            },
+        )
+
+    def test_remote_provider_smoke_history_route_requires_product_admin_access(self) -> None:
+        _AP.request_with_header_auth_and_assert_json_error(
+            self,
+            self.client,
+            "GET",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke-runs",
+            role="operator",
+            status_code=403,
+            error_code="AUTH_FORBIDDEN",
+        )
+
+    def test_remote_provider_smoke_history_route_allows_product_admin_alias(self) -> None:
+        _response, data = _AP.request_with_header_auth_and_get_data(
+            self,
+            self.client,
+            "GET",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke-runs",
+            role="org_admin",
+            params={"limit": 1},
+        )
+
+        _AP.assert_fields(
+            self,
+            data[0],
+            expected_fields={
+                "diagnostic_run_id": "runtime-smoke-stub-1",
+                "actor_role": "product_admin",
+                "request_payload.providers.0": "deployment_lookup",
+                "response.summary.skipped_count": 1,
+            },
+        )
+
+    def test_remote_provider_smoke_history_route_supports_filters(self) -> None:
+        _response, data = _AP.request_with_header_auth_and_get_data(
+            self,
+            self.client,
+            "GET",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke-runs",
+            role="org_admin",
+            params={
+                "limit": 1,
+                "actor_user_id": "user-admin-1",
+                "request_id": "req-runtime-smoke-stub-1",
+                "provider": "deployment_lookup",
+            },
+        )
+
+        _AP.assert_collection_size(self, data, size=1)
+        _AP.assert_fields(
+            self,
+            data[0],
+            expected_fields={
+                "diagnostic_run_id": "runtime-smoke-stub-1",
+                "request_id": "req-runtime-smoke-stub-1",
+                "response.results.0.provider": "deployment_lookup",
+            },
+        )
+
+    def test_remote_provider_smoke_summary_route_requires_product_admin_access(self) -> None:
+        _AP.request_with_header_auth_and_assert_json_error(
+            self,
+            self.client,
+            "GET",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke-summary",
+            role="operator",
+            status_code=403,
+            error_code="AUTH_FORBIDDEN",
+        )
+
+    def test_remote_provider_smoke_summary_route_allows_product_admin_alias(self) -> None:
+        _response, data = _AP.request_with_header_auth_and_get_data(
+            self,
+            self.client,
+            "GET",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke-summary",
+            role="org_admin",
+            params={"limit": 10, "provider": "deployment_lookup"},
+        )
+
+        _AP.assert_fields(
+            self,
+            data,
+            expected_fields={
+                "scanned_run_count": 1,
+                "provider_count": 1,
+                "providers.0.provider": "deployment_lookup",
+                "providers.0.last_status": "skipped",
             },
         )
 
@@ -737,9 +998,60 @@ class OpsGraphRouteAuthorizationTests(unittest.TestCase):
         self.assertIn("OpsGraph Replay Worker Monitor", response.text)
         self.assertIn("/api/v1/opsgraph/replays/worker-status", response.text)
         self.assertIn("/api/v1/opsgraph/replays/worker-status/stream", response.text)
+        self.assertIn("/api/v1/opsgraph/runtime-capabilities", response.text)
         self.assertIn("EventSource", response.text)
         self.assertIn("Latest Failure", response.text)
         self.assertIn("No recent worker failure recorded.", response.text)
+        self.assertIn("Remote Provider Smoke", response.text)
+        self.assertIn("No remote provider smoke regression recorded.", response.text)
+        self.assertIn("refreshRuntimeCapabilities", response.text)
+        self.assertIn("Focus Alert Provider", response.text)
+        self.assertIn("Remote Smoke Drilldown", response.text)
+        self.assertIn("Provider Summary", response.text)
+        self.assertIn("Recent Diagnostic Runs", response.text)
+        self.assertIn("Refresh Smoke", response.text)
+        self.assertIn("Clear Provider", response.text)
+        self.assertIn("Copy Format", response.text)
+        self.assertIn("smokeCopyFormat", response.text)
+        self.assertIn("Copy Smoke Window", response.text)
+        self.assertIn("Export Smoke Window", response.text)
+        self.assertIn("Run Smoke", response.text)
+        self.assertIn("/api/v1/opsgraph/runtime/remote-provider-smoke", response.text)
+        self.assertIn("/api/v1/opsgraph/runtime/remote-provider-smoke-summary", response.text)
+        self.assertIn("/api/v1/opsgraph/runtime/remote-provider-smoke-runs", response.text)
+        self.assertIn("refreshSmokeDrilldown", response.text)
+        self.assertIn("refreshRuntimeSignals", response.text)
+        self.assertIn("runRemoteProviderSmokeForProvider", response.text)
+        self.assertIn("describeSmokeRunResult", response.text)
+        self.assertIn("Show Details", response.text)
+        self.assertIn("Copy Context", response.text)
+        self.assertIn("Export JSON", response.text)
+        self.assertIn("Response Summary", response.text)
+        self.assertIn("Result Details", response.text)
+        self.assertIn("toggleSmokeRunDetails", response.text)
+        self.assertIn("buildSmokeRunDetailPayload", response.text)
+        self.assertIn("copySmokeRunContext", response.text)
+        self.assertIn("exportSmokeRunDetails", response.text)
+        self.assertIn("copySmokeWindowContext", response.text)
+        self.assertIn("exportSmokeWindow", response.text)
+        self.assertIn("getSmokeCopyFormat", response.text)
+        self.assertIn("smoke_copy_format", response.text)
+        self.assertIn("buildSmokeWindowContextText", response.text)
+        self.assertIn("buildSmokeRunContextText", response.text)
+        self.assertIn("buildSmokeResultDigestLines", response.text)
+        self.assertIn("buildSmokeProviderDigestLines", response.text)
+        self.assertIn("buildSmokeRunDigestLines", response.text)
+        self.assertIn("buildSmokeRunExportPayload", response.text)
+        self.assertIn("buildSmokeRunExportFilename", response.text)
+        self.assertIn("buildSmokeWindowExportPayload", response.text)
+        self.assertIn("buildSmokeWindowExportFilename", response.text)
+        self.assertIn("renderSmokeSummary", response.text)
+        self.assertIn("renderSmokeRuns", response.text)
+        self.assertIn("startRuntimeSignalRefreshLoop", response.text)
+        self.assertIn("stopRuntimeSignalRefreshLoop", response.text)
+        self.assertIn("setInterval", response.text)
+        self.assertIn("pagehide", response.text)
+        self.assertIn("Live via SSE + smoke polling", response.text)
         self.assertIn("Alert Policy", response.text)
         self.assertIn("/api/v1/opsgraph/replays/worker-alert-policy", response.text)
         self.assertIn("Reset to Default", response.text)
@@ -1084,6 +1396,28 @@ class OpsGraphRouteAuthorizationTests(unittest.TestCase):
             },
         )
 
+    def test_replay_quality_summary_route_allows_viewer_access(self) -> None:
+        _response, data = _AP.request_with_header_auth_and_get_data(
+            self,
+            self.client,
+            "GET",
+            "/api/v1/opsgraph/replays/summary",
+            role="viewer",
+            params={"workspace_id": "ops-ws-1"},
+        )
+
+        _AP.assert_fields(
+            self,
+            data,
+            expected_fields={
+                "workspace_id": "ops-ws-1",
+                "baseline_count": 1,
+                "evaluation_count": 1,
+                "replay_pass_rate": 1.0,
+                "avg_top_hypothesis_hit_rate": 1.0,
+            },
+        )
+
 
 @unittest.skipIf(TestClient is None, "fastapi test client unavailable")
 class OpsGraphAuthRouteTests(unittest.TestCase):
@@ -1261,6 +1595,160 @@ class OpsGraphAuthRouteTests(unittest.TestCase):
                 "model_provider.effective_mode": "local",
                 "tooling.incident_store.backend_id": "sqlalchemy-repository",
                 "replay_worker_alert_policy.warning_consecutive_failures": 1,
+            },
+        )
+
+    def test_session_admin_can_run_remote_provider_smoke(self) -> None:
+        _login_response, access_token = _AP.login_via_session_route(
+            self,
+            self.client,
+            email="admin@example.com",
+            password="opsgraph-demo",
+        )
+
+        _response, data = _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "POST",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke",
+            access_token=access_token,
+            json={"providers": ["deployment_lookup"]},
+        )
+
+        _AP.assert_fields(
+            self,
+            data,
+            expected_fields={
+                "providers.0": "deployment_lookup",
+                "summary.skipped_count": 1,
+                "exit_code": 0,
+            },
+        )
+        self.assertTrue(str(data["diagnostic_run_id"]).startswith("runtime-smoke-"))
+
+    def test_session_admin_can_read_remote_provider_smoke_history(self) -> None:
+        _login_response, access_token = _AP.login_via_session_route(
+            self,
+            self.client,
+            email="admin@example.com",
+            password="opsgraph-demo",
+        )
+        _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "POST",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke",
+            access_token=access_token,
+            headers={"X-Request-Id": "req-runtime-smoke-history-1"},
+            json={"providers": ["deployment_lookup"]},
+        )
+
+        _response, data = _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "GET",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke-runs",
+            access_token=access_token,
+            params={"limit": 1},
+        )
+
+        _AP.assert_fields(
+            self,
+            data[0],
+            expected_fields={
+                "actor_user_id": "user-admin-1",
+                "request_id": "req-runtime-smoke-history-1",
+                "request_payload.providers.0": "deployment_lookup",
+                "response.summary.skipped_count": 1,
+            },
+        )
+
+    def test_session_admin_can_filter_remote_provider_smoke_history(self) -> None:
+        _login_response, access_token = _AP.login_via_session_route(
+            self,
+            self.client,
+            email="admin@example.com",
+            password="opsgraph-demo",
+        )
+        _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "POST",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke",
+            access_token=access_token,
+            headers={"X-Request-Id": "req-runtime-smoke-filter-1"},
+            json={"providers": ["deployment_lookup"]},
+        )
+        _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "POST",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke",
+            access_token=access_token,
+            headers={"X-Request-Id": "req-runtime-smoke-filter-2"},
+            json={"providers": ["runbook_search"]},
+        )
+
+        _response, data = _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "GET",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke-runs",
+            access_token=access_token,
+            params={
+                "limit": 5,
+                "actor_user_id": "user-admin-1",
+                "request_id": "req-runtime-smoke-filter-2",
+                "provider": "runbook_search",
+            },
+        )
+
+        _AP.assert_collection_size(self, data, size=1)
+        _AP.assert_fields(
+            self,
+            data[0],
+            expected_fields={
+                "actor_user_id": "user-admin-1",
+                "request_id": "req-runtime-smoke-filter-2",
+                "request_payload.providers.0": "runbook_search",
+                "response.results.0.provider": "runbook_search",
+            },
+        )
+
+    def test_session_admin_can_read_remote_provider_smoke_summary(self) -> None:
+        _login_response, access_token = _AP.login_via_session_route(
+            self,
+            self.client,
+            email="admin@example.com",
+            password="opsgraph-demo",
+        )
+        _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "POST",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke",
+            access_token=access_token,
+            headers={"X-Request-Id": "req-runtime-smoke-summary-1"},
+            json={"providers": ["deployment_lookup"]},
+        )
+
+        _response, data = _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "GET",
+            "/api/v1/opsgraph/runtime/remote-provider-smoke-summary",
+            access_token=access_token,
+            params={"limit": 5, "provider": "deployment_lookup"},
+        )
+
+        _AP.assert_fields(
+            self,
+            data,
+            expected_fields={
+                "provider_count": 1,
+                "providers.0.provider": "deployment_lookup",
+                "providers.0.run_count": 1,
+                "providers.0.last_status": "skipped",
             },
         )
 
@@ -1518,6 +2006,69 @@ class OpsGraphAuthRouteTests(unittest.TestCase):
                 "action_type": "replay.update_worker_alert_policy",
                 "subject_type": "replay_worker_alert_policy",
                 "request_id": "req-policy-audit-1",
+            },
+        )
+
+    def test_session_admin_can_read_replay_quality_summary(self) -> None:
+        _login_response, access_token = _AP.login_via_session_route(
+            self,
+            self.client,
+            email="admin@example.com",
+            password="opsgraph-demo",
+        )
+        baseline_response = _AP.request_with_bearer(
+            self.client,
+            "POST",
+            "/api/v1/opsgraph/replays/baselines/capture",
+            access_token=access_token,
+            json={"incident_id": "incident-1", "model_bundle_version": "route-summary-v1"},
+        )
+        self.assertEqual(baseline_response.status_code, 200)
+        baseline_id = baseline_response.json()["data"]["baseline_id"]
+        replay_response = _AP.request_with_bearer(
+            self.client,
+            "POST",
+            "/api/v1/opsgraph/replays/run",
+            access_token=access_token,
+            headers={"Idempotency-Key": "route-summary-replay-1"},
+            json={"incident_id": "incident-1", "model_bundle_version": "route-summary-v1"},
+        )
+        self.assertEqual(replay_response.status_code, 202)
+        replay_run_id = replay_response.json()["data"]["id"]
+        _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "POST",
+            f"/api/v1/opsgraph/replays/{replay_run_id}/execute",
+            access_token=access_token,
+        )
+        _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "POST",
+            f"/api/v1/opsgraph/replays/{replay_run_id}/evaluate",
+            access_token=access_token,
+            json={"baseline_id": baseline_id},
+        )
+
+        _response, data = _AP.request_with_bearer_and_get_data(
+            self,
+            self.client,
+            "GET",
+            "/api/v1/opsgraph/replays/summary",
+            access_token=access_token,
+            params={"workspace_id": "ops-ws-1"},
+        )
+
+        _AP.assert_fields(
+            self,
+            data,
+            expected_fields={
+                "workspace_id": "ops-ws-1",
+                "baseline_count": 1,
+                "evaluation_count": 1,
+                "mismatched_evaluation_count": 1,
+                "replay_pass_rate": 0.0,
             },
         )
 
@@ -1859,6 +2410,68 @@ class OpsGraphAuthRouteTests(unittest.TestCase):
             json={"role": "viewer"},
         )
 
+
+@unittest.skipIf(TestClient is None, "fastapi test client unavailable")
+class OpsGraphPersistentAuthRouteTests(unittest.TestCase):
+    def test_persistent_business_routes_reject_header_only_auth_by_default(self) -> None:
+        temp_dir, database_url = _create_auth_database_url()
+        self.addCleanup(temp_dir.cleanup)
+        with _patched_auth_env():
+            service = build_app_service(database_url=database_url)
+        self.addCleanup(service.close)
+        client = _AP.create_managed_test_client(self, create_fastapi_app(service))
+
+        _AP.request_with_header_auth_and_assert_json_error(
+            self,
+            client,
+            "GET",
+            "/api/v1/opsgraph/incidents",
+            role="viewer",
+            params={"workspace_id": "ops-ws-1"},
+            status_code=401,
+            error_code="AUTH_SESSION_REQUIRED",
+        )
+
+    def test_persistent_auth_routes_accept_bootstrap_admin_session(self) -> None:
+        temp_dir, database_url = _create_auth_database_url()
+        self.addCleanup(temp_dir.cleanup)
+        with _patched_auth_env(
+            OPSGRAPH_BOOTSTRAP_ADMIN_EMAIL="bootstrap-admin@example.com",
+            OPSGRAPH_BOOTSTRAP_ADMIN_PASSWORD="bootstrap-secret",
+            OPSGRAPH_BOOTSTRAP_ORG_SLUG="bootstrap-org",
+        ):
+            service = build_app_service(database_url=database_url)
+        self.addCleanup(service.close)
+        client = _AP.create_managed_test_client(self, create_fastapi_app(service))
+
+        _login_response, access_token = _AP.login_via_session_route(
+            self,
+            client,
+            email="bootstrap-admin@example.com",
+            password="bootstrap-secret",
+            organization_slug="bootstrap-org",
+        )
+        _response, data = _AP.request_with_bearer_and_get_data(
+            self,
+            client,
+            "GET",
+            "/api/v1/opsgraph/runtime-capabilities",
+            access_token=access_token,
+        )
+
+        _AP.assert_fields(
+            self,
+            data,
+            expected_fields={
+                "product": "opsgraph",
+                "auth.mode": "strict",
+                "auth.header_fallback_enabled": False,
+                "replay_worker_alert_policy.warning_consecutive_failures": 1,
+                "replay_worker_alert_policy.critical_consecutive_failures": 3,
+            },
+        )
+
+
 def _stub_service():
     return SimpleNamespace(
         auth_service=None,
@@ -1869,6 +2482,10 @@ def _stub_service():
                 "model_provider_mode": "local",
                 "model_backend_id": "heuristic-local",
                 "tooling_profile": "product-runtime",
+                "auth_mode": "demo_compatible",
+                "auth_header_fallback_enabled": True,
+                "auth_demo_seed_enabled": True,
+                "auth_bootstrap_admin_configured": False,
                 "replay_worker_alert_level": "healthy",
             },
         },
@@ -1880,6 +2497,13 @@ def _stub_service():
                 "backend_id": "heuristic-local",
                 "fallback_reason": "MODEL_PROVIDER_NOT_CONFIGURED",
                 "details": {},
+            },
+            "auth": {
+                "mode": "demo_compatible",
+                "header_fallback_enabled": True,
+                "demo_seed_enabled": True,
+                "bootstrap_admin_configured": False,
+                "bootstrap_organization_slug": None,
             },
             "tooling": {
                 "incident_store": {
@@ -1922,6 +2546,139 @@ def _stub_service():
                 "source": "default",
                 "updated_at": None,
             },
+        },
+        run_remote_provider_smoke=lambda command, **kwargs: {
+            "providers": list(command.providers) or ["deployment_lookup"],
+            "summary": {
+                "success_count": 0,
+                "skipped_count": len(list(command.providers) or ["deployment_lookup"]),
+                "failed_count": 0,
+            },
+            "results": [
+                {
+                    "provider": provider,
+                    "status": "skipped",
+                    "reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                    "capability": {
+                        "requested_mode": "auto",
+                        "effective_mode": "local",
+                        "backend_id": "heuristic-provider",
+                        "fallback_reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                        "details": {"fallback_enabled": True},
+                    },
+                    "request": {"service_id": command.service_id},
+                    "response": None,
+                    "provenance": None,
+                }
+                for provider in (list(command.providers) or ["deployment_lookup"])
+            ],
+            "exit_code": 0,
+            "diagnostic_run_id": "runtime-smoke-stub-1",
+            "created_at": "2026-03-27T09:00:06",
+        },
+        list_remote_provider_smoke_runs=lambda limit=10, actor_user_id=None, request_id=None, provider=None: [
+            {
+                "diagnostic_run_id": "runtime-smoke-stub-1",
+                "actor_type": "user",
+                "actor_user_id": "user-admin-1",
+                "actor_role": "product_admin",
+                "session_id": "session-admin-1",
+                "request_id": "req-runtime-smoke-stub-1",
+                "request_payload": {
+                    "providers": ["deployment_lookup"],
+                    "include_write": False,
+                    "allow_write": False,
+                    "require_configured": False,
+                },
+                "response": {
+                    "providers": ["deployment_lookup"],
+                    "summary": {
+                        "success_count": 0,
+                        "skipped_count": 1,
+                        "failed_count": 0,
+                    },
+                    "results": [
+                        {
+                            "provider": "deployment_lookup",
+                            "status": "skipped",
+                            "reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                            "capability": {
+                                "requested_mode": "auto",
+                                "effective_mode": "local",
+                                "backend_id": "heuristic-provider",
+                                "fallback_reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                                "details": {"fallback_enabled": True},
+                            },
+                            "request": {"service_id": "checkout-api"},
+                            "response": None,
+                            "provenance": None,
+                        }
+                    ],
+                    "exit_code": 0,
+                    "diagnostic_run_id": "runtime-smoke-stub-1",
+                    "created_at": "2026-03-27T09:00:06",
+                },
+                "created_at": "2026-03-27T09:00:06",
+            }
+        ][:limit]
+        if (
+            actor_user_id in {None, "", "user-admin-1"}
+            and request_id in {None, "", "req-runtime-smoke-stub-1"}
+            and provider in {None, "", "deployment_lookup"}
+        )
+        else [],
+        summarize_remote_provider_smoke_runs=lambda limit=50, actor_user_id=None, request_id=None, provider=None: {
+            "scanned_run_count": 1,
+            "provider_count": 1,
+            "providers": [
+                {
+                    "provider": "deployment_lookup",
+                    "run_count": 1,
+                    "success_count": 0,
+                    "skipped_count": 1,
+                    "failed_count": 0,
+                    "last_status": "skipped",
+                    "last_reason": "REMOTE_PROVIDER_NOT_ACTIVE",
+                    "last_seen_at": "2026-03-27T09:00:06",
+                    "last_success_at": None,
+                    "last_failure_at": None,
+                    "last_skipped_at": "2026-03-27T09:00:06",
+                    "last_diagnostic_run_id": "runtime-smoke-stub-1",
+                    "latest_effective_mode": "local",
+                    "latest_backend_id": "heuristic-provider",
+                    "latest_strict_remote_required": False,
+                }
+            ],
+        }
+        if (
+            limit >= 1
+            and actor_user_id in {None, "", "user-admin-1"}
+            and request_id in {None, "", "req-runtime-smoke-stub-1"}
+            and provider in {None, "", "deployment_lookup"}
+        )
+        else {"scanned_run_count": 0, "provider_count": 0, "providers": []},
+        get_replay_quality_summary=lambda workspace_id, incident_id=None: {
+            "workspace_id": workspace_id,
+            "incident_id": incident_id,
+            "incident_count": 1,
+            "replay_case_count": 1,
+            "replay_case_expected_output_count": 1,
+            "replay_case_expected_output_coverage_rate": 1.0,
+            "baseline_count": 1,
+            "baseline_incident_coverage_count": 1,
+            "baseline_coverage_rate": 1.0,
+            "evaluation_count": 1,
+            "matched_evaluation_count": 1,
+            "mismatched_evaluation_count": 0,
+            "replay_pass_rate": 1.0,
+            "avg_replay_score": 1.0,
+            "semantic_evaluation_count": 1,
+            "avg_semantic_match_rate": 1.0,
+            "avg_top_hypothesis_hit_rate": 1.0,
+            "avg_recommendation_match_rate": 1.0,
+            "avg_comms_match_rate": 1.0,
+            "latest_report_id": "report-stub-1",
+            "latest_report_created_at": "2026-03-27T09:00:10",
         },
         get_replay_worker_alert_policy=lambda workspace_id: {
             "workspace_id": workspace_id,
